@@ -2,6 +2,7 @@
 #include "stm32f7xx.h"
 #include <string.h>
 #include <stdlib.h>
+#include <cmath>
 
 // Flags y variables de control
 uint8_t flag = 0, i, cont = 0;
@@ -10,19 +11,19 @@ char text[64]; // Buffer para mensajes
 char cmd_buffer[32]; // Buffer para comandos recibidos
 uint8_t cmd_index = 0;
 
-// Variables ADC1 - Temperatura (PT100)
-uint16_t digital1;
-float voltaje1;
-double gradospt100;
+// Variables ADC2 - distancia sharp
+volatile uint16_t data_value_adc2;
+volatile float voltaje1;
+volatile double distancesharp;
 
-// Variables ADC2 - Peso (Celda de carga)
-uint16_t digital2;
-float voltaje2;
-double pesog;
+// Variables ADC2 - intensidad lumínica
+volatile uint16_t data_value_adc1;
+volatile float voltaje2;
+volatile double pesog;
 
 // Variables para control de tiempos
-uint32_t tiempo1 = 1; // Tiempo de muestreo para ADC2 (temperatura)
-uint32_t tiempo2 = 1; // Tiempo de muestreo para ADC1 (peso)
+uint32_t tiempo1 = 1; // Tiempo de muestreo para ADC2 (distancia sharp)
+uint32_t tiempo2 = 1; // Tiempo de muestreo para ADC1 (intensidad lumínica)
 char time_unit = 's'; // 'm' para ms, 's' para segundos, 'M' para minutos
 
 // Variables para filtro promedio
@@ -31,8 +32,8 @@ float temp_buffer[MAX_SAMPLES];
 float peso_buffer[MAX_SAMPLES];
 uint8_t temp_index = 0;
 uint8_t peso_index = 0;
-uint8_t temp_samples = 10; // Número de muestras por defecto para temperatura
-uint8_t peso_samples = 10; // Número de muestras por defecto para peso
+uint8_t temp_samples = 10; // Número de muestras por defecto para distancia sharp
+uint8_t peso_samples = 10; // Número de muestras por defecto para intensidad lumínica
 uint8_t filtro_temp = 0;   // 0: Sin filtro, 1: Con filtro
 uint8_t filtro_peso = 0;   // 0: Sin filtro, 1: Con filtro
 
@@ -107,7 +108,7 @@ void procesar_comando(const char* cmd) {
     
     // Procesar comandos con valores
     if (strcmp(tipo, "T1") == 0) {
-        // Cambiar tiempo de muestreo para temperatura
+        // Cambiar tiempo de muestreo para distancia sharp
         int val = atoi(valor);
         if (val > 0) {
             tiempo1 = val;
@@ -115,11 +116,11 @@ void procesar_comando(const char* cmd) {
             UART_Send_String(text);
             
             // Debug - confirmar el comando recibido
-            sprintf(text, "DEBUG:Tiempo temperatura actualizado a %lu %c\r\n", tiempo1, time_unit);
+            sprintf(text, "DEBUG:Tiempo distancia sharp actualizado a %lu %c\r\n", tiempo1, time_unit);
             UART_Send_String(text);
         }
     } else if (strcmp(tipo, "T2") == 0) {
-        // Cambiar tiempo de muestreo para peso
+        // Cambiar tiempo de muestreo para intensidad lumínica
         int val = atoi(valor);
         if (val > 0) {
             tiempo2 = val;
@@ -127,7 +128,7 @@ void procesar_comando(const char* cmd) {
             UART_Send_String(text);
             
             // Debug - confirmar el comando recibido
-            sprintf(text, "DEBUG:Tiempo peso actualizado a %lu %c\r\n", tiempo2, time_unit);
+            sprintf(text, "DEBUG:Tiempo intensidad lumínica actualizado a %lu %c\r\n", tiempo2, time_unit);
             UART_Send_String(text);
         }
     } else if (strcmp(tipo, "TU") == 0) {
@@ -142,17 +143,17 @@ void procesar_comando(const char* cmd) {
             UART_Send_String(text);
         }
     } else if (strcmp(tipo, "FT") == 0) {
-        // Filtro temperatura (0=off, 1=on)
+        // Filtro distancia sharp (0=off, 1=on)
         filtro_temp = (atoi(valor) == 0) ? 0 : 1;
         sprintf(text, "OK:FT:%d\r\n", filtro_temp);
         UART_Send_String(text);
     } else if (strcmp(tipo, "FP") == 0) {
-        // Filtro peso (0=off, 1=on)
+        // Filtro intensidad lumínica (0=off, 1=on)
         filtro_peso = (atoi(valor) == 0) ? 0 : 1;
         sprintf(text, "OK:FP:%d\r\n", filtro_peso);
         UART_Send_String(text);
     } else if (strcmp(tipo, "ST") == 0) {
-        // Muestras para filtro temperatura
+        // Muestras para filtro distancia sharp
         int val = atoi(valor);
         if (val > 0 && val <= MAX_SAMPLES) {
             temp_samples = val;
@@ -160,7 +161,7 @@ void procesar_comando(const char* cmd) {
             UART_Send_String(text);
         }
     } else if (strcmp(tipo, "SP") == 0) {
-        // Muestras para filtro peso
+        // Muestras para filtro intensidad lumínica
         int val = atoi(valor);
         if (val > 0 && val <= MAX_SAMPLES) {
             peso_samples = val;
@@ -192,29 +193,29 @@ extern "C" {
         }
     }
 
-    // Interrupción del Timer 2 - Muestreo de temperatura
+    // Interrupción del Timer 2 - Muestreo dedistancia sharp
     void TIM2_IRQHandler(void) { 
         TIM2->SR &= ~(1<<0); // Limpiar el flag de interrupción del TIM2
         
         // Solo enviar datos si la adquisición está activa
         if (flag) {
-            // Tomar lectura del ADC2 (temperatura)
+            // Tomar lectura del ADC2 distancia sharp
             ADC2->CR2 |= (1<<30); // Iniciar conversión A/D
             while (((ADC2->SR & (1<<1)) >> 1) == 0) {} // Esperar a que termine la conversión
             ADC2->SR &= ~(1<<1); // Limpiar el flag EOC
-            digital1 = ADC2->DR;
-            voltaje1 = (float)digital1 * (3.3f / 4095.0f); // Corrección para resolución completa de 12 bits
-            gradospt100 = (30.305f * voltaje1);
+            data_value_adc2 = ADC2->DR;
+            voltaje2 = (float)data_value_adc2 * (3.3f / 4095.0f); // Corrección para resolución completa de 12 bits
+            distancesharp=25.63f*pow(voltaje2, -1.268f); // Conversión a distancia en cm
             
             // Aplicar filtro promedio si está activado
             if (filtro_temp) {
-                temp_buffer[temp_index] = gradospt100;
+                temp_buffer[temp_index] = distancesharp;
                 temp_index = (temp_index + 1) % temp_samples;
-                gradospt100 = calcularPromedio(temp_buffer, temp_samples);
+                distancesharp = calcularPromedio(temp_buffer, temp_samples);
             }
             
             // Enviar datos formateados por UART
-            sprintf(text, "TEMP:%.2f\r\n", gradospt100);
+            sprintf(text, "TEMP:%.2f\r\n", distancesharp);
             UART_Send_String(text);
             
             // Toggle LED para indicar actividad
@@ -222,19 +223,19 @@ extern "C" {
         }
     }
 
-    // Interrupción del Timer 5 - Muestreo de peso
+    // Interrupción del Timer 5 - Muestreo de intensidad lumínica
     void TIM5_IRQHandler(void) { 
         TIM5->SR &= ~(1<<0); // Limpiar el flag de interrupción del TIM5
         
         // Solo enviar datos si la adquisición está activa
         if (flag) {
-            // Tomar lectura del ADC1 (peso)
+            // Tomar lectura del ADC1 (intensidad lumínica)
             ADC1->CR2 |= (1<<30); // Iniciar conversión A/D
             while (((ADC1->SR & (1<<1)) >> 1) == 0) {} // Esperar a que termine la conversión
             ADC1->SR &= ~(1<<1); // Limpiar el flag EOC
-            digital2 = ADC1->DR;
-            voltaje2 = (float)digital2 * (3.3f / 1023.0f); // Corrección para resolución completa de 10 bits
-            pesog = (voltaje2 * 303.03f);
+            data_value_adc1 = ADC1->DR;
+            voltaje1 = data_value_adc1 * (3.3 / 990); // Corrección para resolución completa de 10 bits
+            pesog = (voltaje1 * 303.03f);
             
             // Aplicar filtro promedio si está activado
             if (filtro_peso) {
@@ -244,7 +245,7 @@ extern "C" {
             }
             
             // Enviar datos formateados por UART
-            sprintf(text, "PESO:%.2f\r\n", pesog);
+            sprintf(text, "intensidad lumínica:%.2f\r\n", pesog);
             UART_Send_String(text);
         }
     }
@@ -338,7 +339,7 @@ int main() {
     // Habilitar interrupción USART3 en NVIC
     NVIC_EnableIRQ(USART3_IRQn); 
     
-    // ----- Configuración de ADC2 para PB1 (temperatura) -----
+    // ----- Configuración de ADC2 para PB1 (distancia) -----
     GPIOB->MODER |= (0b11<<2); // PB1 como entrada analógica
     
     RCC->APB2ENR |= (1<<9); // Habilitar reloj ADC2
@@ -347,17 +348,17 @@ int main() {
     ADC2->SMPR1 |= (0b111<<6); // Tiempo de muestreo máximo
     ADC2->SQR3 = 9; // Canal 9 para PB1
     
-    // ----- Configuración de ADC1 para PC4 (peso) -----
+    // ----- Configuración de ADC1 para PC4 intensidad lumínica) -----
     GPIOC->MODER |= (0b11<<8); // PC4 como entrada analógica
     
     RCC->APB2ENR |= (1<<8); // Habilitar reloj ADC1
     ADC1->CR2 |= ((1<<10) | (1<<0)); // EOCS y ADC Enable
     ADC1->CR1 &= ~(0b11<<24); // limpiar bits de resolución
-    ADC1->CR1 |= (0b01<<24); // Resolución a 10 bits
+    ADC1->CR1 |= (1<<24); // Resolución a 10 bits
     ADC1->SMPR1 |= (0b111<<12); // Tiempo de muestreo máximo
     ADC1->SQR3 = 14; // Canal 14 para PC4
     
-    // ----- Configuración de Timer 2 para muestreo de temperatura -----
+    // ----- Configuración de Timer 2 para muestreo de distancia -----
     RCC->APB1ENR |= (1<<0); // Habilitar reloj TIM2
     TIM2->PSC = 16000 - 1; // Prescaler para 1ms a 16MHz
     TIM2->ARR = 1000; // Periodo inicial (1s)
@@ -367,7 +368,7 @@ int main() {
     // Habilitar interrupción TIM2 en NVIC
     NVIC_EnableIRQ(TIM2_IRQn); 
     
-    // ----- Configuración de Timer 5 para muestreo de peso -----
+    // ----- Configuración de Timer 5 para muestreo de intensidad lumínica -----
     RCC->APB1ENR |= (1<<3); // Habilitar reloj TIM5
     TIM5->PSC = 16000 - 1; // Prescaler para 1ms a 16MHz
     TIM5->ARR = 1000; // Periodo inicial (1s)
@@ -424,7 +425,7 @@ int main() {
             TIM5->CR1 |= (1<<0); // Habilitar timer
             
             // Informar del cambio
-            sprintf(text, "INFO:Timer peso actualizado: %lu ms\r\n", arr_value2);
+            sprintf(text, "INFO:Timer intensidad lumínica actualizado: %lu ms\r\n", arr_value2);
             UART_Send_String(text);
         }
         

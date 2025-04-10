@@ -28,7 +28,8 @@ class RealTimeGraph(QMainWindow):
         self.running = False  # Thread control flag
         self.use_simulated_data = True  # Flag to toggle between simulated and real data
         self.is_paused = False  # Flag to pause/resume graphs
-        self.timer = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_graphs)
 
         # Add connection status at class level
         self.connection_status = None
@@ -37,6 +38,9 @@ class RealTimeGraph(QMainWindow):
         self.lux_data = []
         self.dist_data = []
         self.time_data = []  # Timestamps for the X-axis
+
+        # Data synchronization lock
+        self.data_lock = threading.Lock()
 
         # Main layout
         self.main_widget = QWidget(self)
@@ -171,34 +175,76 @@ class RealTimeGraph(QMainWindow):
         self.controls_layout.addWidget(title_label, self.controls_layout.rowCount(), 0, 1, 3)
 
     def refresh_ports(self):
+        """Refresh available serial ports."""
         self.port_combo.clear()
-        ports = serial.tools.list_ports.comports()
-        for port in ports:
-            self.port_combo.addItem(port.device)
+        try:
+            ports = serial.tools.list_ports.comports()
+            for port in ports:
+                self.port_combo.addItem(port.device)
+            
+            # Add refresh button
+            if not hasattr(self, 'refresh_button'):
+                self.refresh_button = QPushButton("Refresh")
+                self.refresh_button.clicked.connect(self.refresh_ports)
+                self.controls_layout.addWidget(self.refresh_button, 0, 6)
+        except Exception as e:
+            print(f"Error refreshing ports: {e}")
 
     def initialize_graph_labels(self):
         """Set initial labels and titles for the graphs."""
-        self.ax_lux.set_title("Light Intensity (%)")
-        self.ax_lux.set_xlabel("Time")
-        self.ax_lux.set_ylabel("Light (%)")
-        self.ax_lux.legend(["Light (%)"], loc="upper right")
+        self.ax_lux.set_title("Fotorresistencia - Intensidad Lumínica (%)")
+        self.ax_lux.set_xlabel("Tiempo")
+        self.ax_lux.set_ylabel("Intensidad Lumínica (%)")
+        self.ax_lux.legend(["Intensidad Lumínica (%)"], loc="upper right")
 
-        self.ax_dist.set_title("Distance (cm)")
-        self.ax_dist.set_xlabel("Time")
-        self.ax_dist.set_ylabel("Distance (cm)")
-        self.ax_dist.legend(["Distance (cm)"], loc="upper right")
+        self.ax_dist.set_title("Sharp - Distancia (cm)")
+        self.ax_dist.set_xlabel("Tiempo")
+        self.ax_dist.set_ylabel("Distancia (cm)")
+        self.ax_dist.legend(["Distancia (cm)"], loc="upper right")
 
         self.canvas.draw()
 
     def connect_serial(self):
-        """Connect to the selected serial port."""
+        """Connect to the selected serial port with improved error handling."""
         try:
             selected_port = self.port_combo.currentText()
             if not selected_port:
                 QMessageBox.warning(self, "Warning", "No serial port selected.")
                 return
+            
+            # Close any existing connection first
+            self.disconnect_serial()
                 
-            self.serial_conn = serial.Serial(selected_port, self.baud_rate, timeout=1)
+            # Try to open with different configurations
+            try:
+                self.serial_conn = serial.Serial(
+                    port=selected_port,
+                    baudrate=self.baud_rate,
+                    timeout=1,
+                    write_timeout=1
+                )
+            except PermissionError:
+                # Try to release the port in case it's held by another instance
+                import subprocess
+                import platform
+                if platform.system() == "Windows":
+                    try:
+                        # Mode COM ports to force release
+                        subprocess.call(["mode", selected_port])
+                    except:
+                        pass
+                    
+                # Try again after a short delay
+                time.sleep(1)
+                self.serial_conn = serial.Serial(
+                    port=selected_port,
+                    baudrate=self.baud_rate,
+                    timeout=1,
+                    write_timeout=1,
+                    exclusive=False  # Try non-exclusive access on Windows
+                )
+            
+            # Set up connection state
             self.connection_status.setText("Status: Connected")
             self.connection_status.setStyleSheet("color: green; font-weight: bold;")
             
@@ -207,52 +253,150 @@ class RealTimeGraph(QMainWindow):
             self.serial_thread.daemon = True
             self.serial_thread.start()
             
+        except serial.SerialException as e:
+            QMessageBox.critical(self, "Error", f"Unable to connect to serial port: {str(e)}\n\nTry closing other applications using this port, or restarting your computer.")
+            self.connection_status.setText("Status: Disconnected")
+            self.connection_status.setStyleSheet("color: red; font-weight: bold;")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Unable to connect to serial port: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Unexpected error: {str(e)}")
             self.connection_status.setText("Status: Disconnected")
             self.connection_status.setStyleSheet("color: red; font-weight: bold;")
 
-    def read_serial_data(self):
-        """Read data from the serial port in a separate thread."""
+    def disconnect_serial(self):
+        """Safely disconnect from serial port."""
+        # First set the flag to signal the thread to stop
+        self.running = False
+        
+        # Give the read thread time to exit with better exception handling
         try:
-            while self.running:
+            if self.serial_thread and self.serial_thread.is_alive():
+                self.serial_thread.join(0.5)  # Wait up to 0.5 seconds for thread to finish
+        except Exception as e:
+            print(f"Error waiting for thread to exit: {e}")
+        
+        # Now close the serial connection
+        if hasattr(self, 'serial_conn') and self.serial_conn:
+            try:
+                if self.serial_conn.is_open:
+                    self.serial_conn.close()
+            except Exception as e:
+                print(f"Error closing serial connection: {e}")
+            self.serial_conn = None
+
+    def read_serial_data(self):
+        """Read data from the serial port in a separate thread with improved error handling."""
+        print("Serial thread started")
+        
+        # Initialize data buffers with default values
+        with self.data_lock:
+            if not self.time_data:
+                now = datetime.now()
+                self.time_data = [now]
+                self.lux_data = [0.0]
+                self.dist_data = [0.0]
+        
+        while self.running:
+            try:
+                # Check if connection is still valid
                 if not self.serial_conn or not self.serial_conn.is_open:
+                    print("Serial connection lost or closed")
                     break
                 
+                # Non-blocking read with timeout
+                if not self.serial_conn.in_waiting:
+                    time.sleep(0.01)  # Small delay to avoid CPU hogging
+                    continue
+                
                 try:
-                    line = self.serial_conn.readline().decode().strip()
-                    if line.startswith("TEMP:"):
-                        value = float(line.split(":")[1])
-                        self.add_data_point(value, "TEMP")
-                    elif line.startswith("PESO:"):
-                        value = float(line.split(":")[1])
-                        self.add_data_point(value, "PESO")
-                except Exception as e:
-                    print(f"Error parsing data: {e}")
-                    time.sleep(0.1)  # Avoid CPU hogging
+                    # Read a line with fixed buffer size to avoid overflow
+                    line = self.serial_conn.readline(256).decode('latin-1', errors='replace').strip()
                     
-        except Exception as e:
-            print(f"Error in serial thread: {e}")
-        finally:
-            print("Serial thread terminated")
+                    # Skip empty lines
+                    if not line:
+                        continue
+                        
+                    # Debug incoming data to console
+                    print(f"Received raw data: '{line}'")
+                    
+                    # Handle distance data (previously parsed as TEMP)
+                    if line.startswith("TEMP:"):
+                        try:
+                            parts = line.split(":")
+                            if len(parts) >= 2:
+                                value_str = parts[1].strip()
+                                value = float(value_str)
+                                print(f"Parsed Sharp distance value: {value}")
+                                
+                                # Thread-safe data update using lock
+                                with self.data_lock:
+                                    now = datetime.now()
+                                    self.dist_data.append(value)  # Now correctly goes to distance data
+                                    self.time_data.append(now)
+                                    print(f"Added Sharp distance data point: {value} at {now}")
+                        except Exception as e:
+                            print(f"Error parsing Sharp distance data: {e}, from line: '{line}'")
+                    
+                    # Handle light intensity data (previously parsed as PESO)
+                    elif line.startswith("intensidad lumínica:"):
+                        try:
+                            parts = line.split(":")
+                            if len(parts) >= 2:
+                                value_str = parts[1].strip()
+                                value = float(value_str)
+                                print(f"Parsed light intensity value: {value}")
+                                
+                                # Thread-safe data update using lock
+                                with self.data_lock:
+                                    now = datetime.now()
+                                    self.lux_data.append(value)  # Now correctly goes to light data
+                                    
+                                    # Only add a new timestamp if this is a completely new reading
+                                    if not self.time_data or abs((now - self.time_data[-1]).total_seconds()) > 0.1:
+                                        self.time_data.append(now)
+                                    
+                                    print(f"Added light intensity data point: {value} at {now}")
+                        except Exception as e:
+                            print(f"Error parsing light intensity data: {e}, from line: '{line}'")
+                    
+                    # Handle status and debug messages
+                    elif line.startswith(("OK:", "INFO:", "ERROR:", "DEBUG:")):
+                        print(f"STM32 message: {line}")
+                        
+                except Exception as e:
+                    print(f"Error reading line: {e}")
+                    time.sleep(0.1)  # Avoid tight loop on error
+            
+            except Exception as e:
+                print(f"Serial thread exception: {e}")
+                time.sleep(0.2)  # Brief delay on errors
+                
+        print("Serial thread exiting normally")
 
     def add_data_point(self, value, data_type):
-        """Add a data point to the appropriate buffer."""
-        now = datetime.now()
-        if data_type == "TEMP":
-            self.lux_data.append(value)
-        elif data_type == "PESO":
-            self.dist_data.append(value)
-        self.time_data.append(now)
-
-        # Keep only the last 60 seconds or 10 minutes of data
-        max_duration = timedelta(minutes=10) if self.time_unit_combo.currentText() == "min" else timedelta(seconds=60)
-        while self.time_data and now - self.time_data[0] > max_duration:
-            self.time_data.pop(0)
+        """Add a data point to the appropriate buffer (thread-safe)."""
+        try:
+            now = datetime.now()
             if data_type == "TEMP":
-                self.lux_data.pop(0)
+                self.lux_data.append(value)
+                self.time_data.append(now)
             elif data_type == "PESO":
-                self.dist_data.pop(0)
+                self.dist_data.append(value)
+                # Only add time point once per unique timestamp to avoid duplicates
+                if not self.time_data or self.time_data[-1] != now:
+                    self.time_data.append(now)
+
+            # Keep only the last 60 seconds or 10 minutes of data
+            max_duration = timedelta(minutes=10) if self.time_unit_combo.currentText() == "min" else timedelta(seconds=60)
+            while self.time_data and now - self.time_data[0] > max_duration:
+                self.time_data.pop(0)
+                
+                # Only remove data if it exists
+                if len(self.lux_data) > 0 and data_type == "TEMP":
+                    self.lux_data.pop(0)
+                if len(self.dist_data) > 0 and data_type == "PESO":
+                    self.dist_data.pop(0)
+        except Exception as e:
+            print(f"Error adding data point: {e}")
 
     def toggle_data_source(self):
         """Toggle between simulated and real data sources."""
@@ -371,149 +515,319 @@ class RealTimeGraph(QMainWindow):
                 print(f"Error sending SP: {e}")
 
     def start_acquisition(self):
-        """Start data acquisition."""
+        """Start data acquisition with improved error handling."""
         try:
-            if not self.use_simulated_data:
-                self.connect_serial()
+            # Reset data buffers to ensure clean start
+            with self.data_lock:
+                self.time_data = []
+                self.lux_data = []  # Fotorresistencia (intensidad lumínica)
+                self.dist_data = []  # Sharp (distancia)
                 
-                # Send initial configuration to the microcontroller
-                self.send_all_settings()
-                
-                # Start acquisition on STM32
-                self.serial_conn.write(b"a\r\n")
-                print("Sent start command")
+            # Update UI first
+            self.connection_status.setText("Status: Starting...")
+            self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
+            QApplication.processEvents()  # Force UI update
             
-            # Create and start the timer
-            if self.timer is None:
-                self.timer = QTimer()
-                self.timer.timeout.connect(self.update_graphs)
-            
+            # Start or ensure timer is running
             if not self.timer.isActive():
-                self.timer.start(100)
+                self.timer.start(200)  # 5 Hz refresh rate - slower for stability
                 
+            # Handle real vs simulated data
+            if not self.use_simulated_data:
+                try:
+                    # Make sure old connections are closed
+                    self.disconnect_serial()
+                    
+                    # Connect to serial port
+                    selected_port = self.port_combo.currentText()
+                    if not selected_port:
+                        QMessageBox.warning(self, "Warning", "No serial port selected.")
+                        self.use_simulated_data = True
+                        return
+                    
+                    # Open serial connection with robust error handling
+                    try:
+                        # First try with normal parameters
+                        self.serial_conn = serial.Serial(
+                            port=selected_port,
+                            baudrate=self.baud_rate,
+                            timeout=0.5,  # Short timeout for better responsiveness
+                            write_timeout=0.5
+                        )
+                    except (serial.SerialException, PermissionError) as e:
+                        print(f"First connection attempt failed: {e}")
+                        
+                        # Try to free the port if needed
+                        try:
+                            import os
+                            if os.name == 'nt':  # Windows
+                                os.system(f"mode {selected_port} baud=9600 parity=n data=8 stop=1")
+                            time.sleep(1)
+                            
+                            # Second try with non-exclusive access (Windows)
+                            self.serial_conn = serial.Serial(
+                                port=selected_port,
+                                baudrate=self.baud_rate,
+                                timeout=0.5,
+                                write_timeout=0.5,
+                                exclusive=False
+                            )
+                        except Exception as e2:
+                            print(f"Second connection attempt failed: {e2}")
+                            raise e  # Raise the original error
+                    
+                    # Update UI for successful connection
+                    self.connection_status.setText("Status: Connected")
+                    self.connection_status.setStyleSheet("color: green; font-weight: bold;")
+                    
+                    # Start the read thread
+                    self.running = True
+                    self.serial_thread = threading.Thread(target=self.read_serial_data)
+                    self.serial_thread.daemon = True  # Thread will exit when main program exits
+                    self.serial_thread.start()
+                    
+                    # Give a moment for thread to start
+                    time.sleep(0.1)
+                    
+                    # Send configuration commands to STM32
+                    self.send_all_settings()
+                    
+                    # Send start command
+                    time.sleep(0.2)  # Short delay before start command
+                    self.serial_conn.write(b"a\r\n")
+                    print("Start command sent")
+                    
+                    # Update UI status
+                    self.connection_status.setText("Status: Acquiring Data")
+                    self.connection_status.setStyleSheet("color: green; font-weight: bold;")
+                    
+                except Exception as e:
+                    print(f"Error in serial connection: {e}")
+                    QMessageBox.critical(self, "Connection Error",
+                                        f"Could not connect to port {selected_port}.\n\n"
+                                        f"Error: {str(e)}\n\n"
+                                        "Switching to simulated data.")
+                    self.use_simulated_data = True
+                    self.connection_status.setText("Status: Using Simulation (Connection Failed)")
+                    self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
+            
+            # Set up for simulated data if needed
             if self.use_simulated_data:
-                self.connection_status.setText("Status: Simulated")
+                self.connection_status.setText("Status: Simulated Data")
                 self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
+        
         except Exception as e:
-            print(f"Error starting acquisition: {e}")
+            print(f"Critical error in start_acquisition: {e}")
+            # Make sure UI stays responsive
+            self.connection_status.setText("Status: Error")
+            self.connection_status.setStyleSheet("color: red; font-weight: bold;")
+
+    def send_all_settings(self):
+        """Send all current settings to the microcontroller with improved error handling."""
+        if not self.serial_conn or not self.serial_conn.is_open:
+            print("Cannot send settings: Serial connection not open")
+            return
+            
+        try:
+            # Use a list of commands to send
+            commands = []
+            
+            # Prepare all commands first
+            unit_map = {"ms": "m", "s": "s", "min": "M"}
+            unit = unit_map[self.time_unit_combo.currentText()]
+            commands.append(f"TU:{unit}\r\n")
+            
+            commands.append(f"T1:{self.t1_spinbox.value()}\r\n")
+            commands.append(f"T2:{self.t2_spinbox.value()}\r\n")
+            
+            commands.append(f"FT:{self.ft_combo.currentIndex()}\r\n")
+            commands.append(f"FP:{self.fp_combo.currentIndex()}\r\n")
+            
+            commands.append(f"ST:{self.st_spinbox.value()}\r\n")
+            commands.append(f"SP:{self.sp_spinbox.value()}\r\n")
+            
+            # Now send each command with delay between them
+            for cmd in commands:
+                self.serial_conn.write(cmd.encode())
+                print(f"Sent: {cmd.strip()}")
+                time.sleep(0.1)  # Short delay between commands
+                
+            print("All settings sent successfully")
+        except Exception as e:
+            print(f"Error sending settings: {e}")
 
     def stop_acquisition(self):
         """Stop data acquisition and close the serial connection safely."""
         try:
-            # Send stop command to STM32 if connected
-            if self.serial_conn and self.serial_conn.is_open:
+            # Update UI first
+            self.connection_status.setText("Status: Stopping...")
+            self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
+            QApplication.processEvents()  # Force UI update
+            
+            # Send stop command if connected to real hardware
+            if self.serial_conn and self.serial_conn.is_open and not self.use_simulated_data:
                 try:
                     self.serial_conn.write(b"b\r\n")
-                    print("Sent stop command")
-                except:
-                    pass
+                    print("Stop command sent")
+                    # Small delay to allow STM32 to process the command
+                    time.sleep(0.2)
+                except Exception as e:
+                    print(f"Error sending stop command: {e}")
             
-            # First stop the timer to prevent concurrent access
-            if self.timer and self.timer.isActive():
+            # Stop the timer
+            if self.timer.isActive():
                 self.timer.stop()
             
-            # Signal the thread to stop and wait a bit
-            self.running = False
-            if self.serial_thread and self.serial_thread.is_alive():
-                self.serial_thread.join(0.5)  # Wait for thread to finish
-            
             # Close serial connection
-            if self.serial_conn and self.serial_conn.is_open:
-                try:
-                    self.serial_conn.close()
-                except:
-                    pass
-                    
+            self.disconnect_serial()
+            
             # Update UI
             self.connection_status.setText("Status: Disconnected")
             self.connection_status.setStyleSheet("color: red; font-weight: bold;")
+            
         except Exception as e:
-            print(f"Error stopping acquisition: {e}")
-
-    def send_all_settings(self):
-        """Send all current settings to the microcontroller."""
-        try:
-            if self.serial_conn and self.serial_conn.is_open:
-                # Send time unit
-                unit_map = {"ms": "m", "s": "s", "min": "M"}
-                unit = unit_map[self.time_unit_combo.currentText()]
-                self.serial_conn.write(f"TU:{unit}\r\n".encode())
-                
-                # Send sampling times
-                self.serial_conn.write(f"T1:{self.t1_spinbox.value()}\r\n".encode())
-                self.serial_conn.write(f"T2:{self.t2_spinbox.value()}\r\n".encode())
-                
-                # Send filter settings
-                self.serial_conn.write(f"FT:{self.ft_combo.currentIndex()}\r\n".encode())
-                self.serial_conn.write(f"FP:{self.fp_combo.currentIndex()}\r\n".encode())
-                
-                # Send filter sample counts
-                self.serial_conn.write(f"ST:{self.st_spinbox.value()}\r\n".encode())
-                self.serial_conn.write(f"SP:{self.sp_spinbox.value()}\r\n".encode())
-                
-                print("Sent all settings to microcontroller")
-        except Exception as e:
-            print(f"Error sending settings: {e}")
+            print(f"Error in stop_acquisition: {e}")
+            self.connection_status.setText("Status: Error")
+            self.connection_status.setStyleSheet("color: red; font-weight: bold;")
 
     def update_graphs(self):
-        if self.is_paused:
-            return
+        """Update graphs with thread-safety and debug output."""
+        try:
+            if self.is_paused:
+                return
 
-        if self.use_simulated_data:
-            self.generate_simulated_data()
+            # For simulated data or initial state
+            if self.use_simulated_data:
+                self.generate_simulated_data()
 
-        self.ax_lux.clear()
-        self.ax_dist.clear()
+            # Make a thread-safe copy of the data
+            with self.data_lock:
+                time_data = self.time_data.copy() if self.time_data else []
+                lux_data = self.lux_data.copy() if self.lux_data else []
+                dist_data = self.dist_data.copy() if self.dist_data else []
+                
+                # Ensure we have equal length arrays by duplicating the last value if needed
+                if len(lux_data) < len(time_data):
+                    print(f"Padding lux data from {len(lux_data)} to {len(time_data)} points")
+                    last_value = lux_data[-1] if lux_data else 0
+                    lux_data.extend([last_value] * (len(time_data) - len(lux_data)))
+                    
+                if len(dist_data) < len(time_data):
+                    print(f"Padding distance data from {len(dist_data)} to {len(time_data)} points")
+                    last_value = dist_data[-1] if dist_data else 0
+                    dist_data.extend([last_value] * (len(time_data) - len(dist_data)))
+                
+                # Trim extra data if needed
+                time_data = time_data[:min(len(time_data), len(lux_data), len(dist_data))]
+                lux_data = lux_data[:len(time_data)]
+                dist_data = dist_data[:len(time_data)]
+            
+            # Print debug info about data
+            print(f"Data status: Time points={len(time_data)}, Light points={len(lux_data)}, Distance points={len(dist_data)}")
+            
+            # Skip update if there's no data
+            if not time_data or len(time_data) == 0:
+                print("No data to plot yet, skipping graph update")
+                return
+                
+            # Clear previous plots
+            self.ax_lux.clear()
+            self.ax_dist.clear()
 
-        # Smooth light data
-        if len(self.time_data) > 3:
-            time_numeric = [t.timestamp() for t in self.time_data]
-            time_smooth = make_interp_spline(time_numeric, self.lux_data)(time_numeric)
-            self.ax_lux.plot(self.time_data, time_smooth, label="Light (%)", color="blue", linestyle="-")
-            self.ax_lux.scatter(self.time_data, self.lux_data, color="blue", s=10, label="Acquisition Points")
-        else:
-            self.ax_lux.plot(self.time_data, self.lux_data, label="Light (%)", color="blue", marker="o", linestyle="-")
-
-        self.ax_lux.set_title("Light Intensity (%)")
-        self.ax_lux.set_xlabel("Time")
-        self.ax_lux.set_ylabel("Light (%)")
-        self.ax_lux.legend()
-        self.ax_lux.grid(True)
-
-        # Smooth distance data
-        if len(self.time_data) > 3:
-            time_numeric = [t.timestamp() for t in self.time_data]
-            dist_smooth = make_interp_spline(time_numeric, self.dist_data)(time_numeric)
-            self.ax_dist.plot(self.time_data, dist_smooth, label="Distance (cm)", color="green", linestyle="-")
-            self.ax_dist.scatter(self.time_data, self.dist_data, color="green", s=10, label="Acquisition Points")
-        else:
-            self.ax_dist.plot(self.time_data, self.dist_data, label="Distance (cm)", color="green", marker="o", linestyle="-")
-
-        self.ax_dist.set_title("Distance (cm)")
-        self.ax_dist.set_xlabel("Time")
-        self.ax_dist.set_ylabel("Distance (cm)")
-        self.ax_dist.legend()
-        self.ax_dist.grid(True)
-
-        self.canvas.draw()
+            # Set grid for both plots
+            self.ax_lux.grid(True)
+            self.ax_dist.grid(True)
+            
+            # Plot the light data
+            try:
+                self.ax_lux.plot(time_data, lux_data, label="Light (%)", color="blue", marker="o", linestyle="-", markersize=4)
+            except Exception as e:
+                print(f"Error plotting light data: {e}")
+                
+            # Plot the distance data
+            try:
+                self.ax_dist.plot(time_data, dist_data, label="Distance (cm)", color="green", marker="o", linestyle="-", markersize=4)
+            except Exception as e:
+                print(f"Error plotting distance data: {e}")
+            
+            # Set titles and labels
+            self.ax_lux.set_title("Fotorresistencia - Intensidad Lumínica (%)")
+            self.ax_lux.set_xlabel("Tiempo")
+            self.ax_lux.set_ylabel("Intensidad Lumínica (%)")
+            self.ax_lux.legend()
+            
+            self.ax_dist.set_title("Sharp - Distancia (cm)")
+            self.ax_dist.set_xlabel("Tiempo")
+            self.ax_dist.set_ylabel("Distancia (cm)")
+            self.ax_dist.legend()
+            
+            # Format time axis for better readability
+            from matplotlib.dates import DateFormatter
+            date_format = DateFormatter('%H:%M:%S')
+            self.ax_lux.xaxis.set_major_formatter(date_format)
+            self.ax_dist.xaxis.set_major_formatter(date_format)
+            
+            # Rotate date labels for better readability
+            for label in self.ax_lux.get_xticklabels():
+                label.set_rotation(45)
+                label.set_ha('right')
+            
+            for label in self.ax_dist.get_xticklabels():
+                label.set_rotation(45)
+                label.set_ha('right')
+                
+            # Auto-adjust spacing to prevent overlapping
+            self.figure.tight_layout()
+            
+            # Update the figure
+            self.canvas.draw()
+            
+            print("Graph updated successfully")
+                
+        except Exception as e:
+            print(f"Critical error in update_graphs: {e}")
+            import traceback
+            traceback.print_exc()
 
     def generate_simulated_data(self):
-        now = datetime.now()
-        self.lux_data.append(random.uniform(0, 100))  # Simulated light percentage
-        self.dist_data.append(random.uniform(10, 150))  # Simulated distance in cm
-        self.time_data.append(now)
+        """Generate simulated data with thread safety."""
+        try:
+            now = datetime.now()
+            
+            with self.data_lock:
+                # Add both light and distance data with the same timestamp
+                self.lux_data.append(random.uniform(0, 100))
+                self.dist_data.append(random.uniform(10, 150))
+                self.time_data.append(now)
 
-        # Keep only the last 60 seconds or 10 minutes of data
-        max_duration = timedelta(minutes=10) if self.time_unit_combo.currentText() == "min" else timedelta(seconds=60)
-        while self.time_data and now - self.time_data[0] > max_duration:
-            self.time_data.pop(0)
-            self.lux_data.pop(0)
-            self.dist_data.pop(0)
+                # Keep only the last 60 seconds or 10 minutes of data
+                max_duration = timedelta(minutes=10) if self.time_unit_combo.currentText() == "min" else timedelta(seconds=60)
+                while len(self.time_data) > 1 and now - self.time_data[0] > max_duration:
+                    self.time_data.pop(0)
+                    if self.lux_data:
+                        self.lux_data.pop(0)
+                    if self.dist_data:
+                        self.dist_data.pop(0)
+        except Exception as e:
+            print(f"Error generating simulated data: {e}")
 
     def closeEvent(self, event):
         """Handle the window close event safely."""
         try:
-            self.stop_acquisition()
+            print("Application closing...")
+            # Stop acquisition and disconnect
+            if hasattr(self, 'timer') and self.timer and self.timer.isActive():
+                self.timer.stop()
+            
+            # Signal thread to stop and close connection
+            self.running = False
+            if hasattr(self, 'serial_conn') and self.serial_conn and self.serial_conn.is_open:
+                try:
+                    self.serial_conn.write(b"b\r\n")  # Send stop command
+                    time.sleep(0.2)  # Give time for command to be processed
+                    self.serial_conn.close()
+                except:
+                    pass
         except:
             pass
         event.accept()
