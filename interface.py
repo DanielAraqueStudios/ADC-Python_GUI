@@ -37,10 +37,15 @@ class RealTimeGraph(QMainWindow):
         # Add connection status at class level
         self.connection_status = None
 
-        # Data buffers
-        self.lux_data = []
-        self.dist_data = []
-        self.time_data = []  # Timestamps for the X-axis
+        # Data buffers - separamos más claramente los datos de cada sensor
+        self.lux_data = []       # Datos de intensidad lumínica
+        self.lux_times = []      # Timestamps específicos para intensidad lumínica
+        self.dist_data = []      # Datos de distancia
+        self.dist_times = []     # Timestamps específicos para distancia
+        
+        # Banderas para controlar si estamos recibiendo datos dentro del intervalo correcto
+        self.last_t1_time = None  # Último tiempo de muestreo para sensor de distancia
+        self.last_t2_time = None  # Último tiempo de muestreo para sensor de luz
 
         # Data synchronization lock
         self.data_lock = threading.Lock()
@@ -68,37 +73,38 @@ class RealTimeGraph(QMainWindow):
         self.layout.addLayout(self.controls_layout)
 
         # Section: Sensor Configuration
-        self.add_section_title("Sensor Configuration")
+        self.add_section_title("Configuración del Sistema")
         
         # Connection status
-        self.connection_status = QLabel("Status: Disconnected")
+        self.connection_status = QLabel("Estado: Desconectado")
         self.connection_status.setProperty("role", "status")
         self.connection_status.setProperty("status", "disconnected")
         self.connection_status.setStyleSheet("color: red; font-weight: bold;")
         self.controls_layout.addWidget(self.connection_status, 0, 0, 1, 1)
 
         # Toggle data source button
-        self.toggle_data_button = QPushButton("Mode: Simulated")
+        self.toggle_data_button = QPushButton("Modo: Simulado")
         self.toggle_data_button.clicked.connect(self.toggle_data_source)
         self.controls_layout.addWidget(self.toggle_data_button, 0, 5)
         
-        self.time_unit_label = QLabel("Time Unit:")
+        self.time_unit_label = QLabel("Unidad de Tiempo:")
         self.time_unit_combo = QComboBox()
         self.time_unit_combo.addItems(["ms", "s", "min"])
+        self.time_unit_combo.setCurrentIndex(1)  # Default to seconds
         self.time_unit_combo.currentIndexChanged.connect(self.update_time_unit)
         self.controls_layout.addWidget(self.time_unit_label, 0, 1)
         self.controls_layout.addWidget(self.time_unit_combo, 0, 2)
 
         # Serial port selection
-        self.port_label = QLabel("Select Port:")
+        self.port_label = QLabel("Puerto Serial:")
         self.port_combo = QComboBox()
         self.refresh_ports()
         self.controls_layout.addWidget(self.port_label, 0, 3)
         self.controls_layout.addWidget(self.port_combo, 0, 4)
 
-        # Temperature sensor controls
-        self.add_section_title("Temperature Sensor")
-        self.t1_label = QLabel("Sampling Time (s):")
+        # Sensor de Distancia Sharp
+        self.add_section_title("Sensor de Distancia Sharp")
+        self.t1_label = QLabel("Tiempo de Muestreo:")
         self.t1_spinbox = QSpinBox()
         self.t1_spinbox.setRange(1, 10000)
         self.t1_spinbox.setValue(1)
@@ -106,26 +112,31 @@ class RealTimeGraph(QMainWindow):
         self.controls_layout.addWidget(self.t1_label, 1, 0)
         self.controls_layout.addWidget(self.t1_spinbox, 1, 1)
 
-        self.temp_real_time_label = QLabel("Real Time: --")
+        self.temp_real_time_label = QLabel("Tiempo Real: 1 s")
         self.controls_layout.addWidget(self.temp_real_time_label, 1, 2)
 
-        self.ft_label = QLabel("Average Filter:")
+        self.ft_label = QLabel("Filtro Promedio:")
         self.ft_combo = QComboBox()
-        self.ft_combo.addItems(["Off", "On"])
+        self.ft_combo.addItems(["Desactivado", "Activado"])
         self.ft_combo.currentIndexChanged.connect(self.update_ft)
         self.controls_layout.addWidget(self.ft_label, 2, 0)
         self.controls_layout.addWidget(self.ft_combo, 2, 1)
 
-        self.st_label = QLabel("Samples for Filtering:")
+        self.st_label = QLabel("Muestras para Filtro:")
         self.st_spinbox = QSpinBox()
         self.st_spinbox.setRange(1, 50)
         self.st_spinbox.setValue(10)
         self.st_spinbox.valueChanged.connect(self.update_st)
         self.controls_layout.addWidget(self.st_label, 2, 2)
+        
+        # Nuevo: Valor actual del sensor
+        self.dist_value_label = QLabel("Valor Actual: -- cm")
+        self.dist_value_label.setStyleSheet("font-weight: bold; color: green;")
+        self.controls_layout.addWidget(self.dist_value_label, 1, 3, 1, 2)
 
-        # Light sensor controls
-        self.add_section_title("Light Sensor")
-        self.t2_label = QLabel("Sampling Time (s):")
+        # Sensor de Luz / Fotorresistencia
+        self.add_section_title("Sensor de Luz / Fotorresistencia")
+        self.t2_label = QLabel("Tiempo de Muestreo:")
         self.t2_spinbox = QSpinBox()
         self.t2_spinbox.setRange(1, 10000)
         self.t2_spinbox.setValue(1)
@@ -133,38 +144,51 @@ class RealTimeGraph(QMainWindow):
         self.controls_layout.addWidget(self.t2_label, 3, 0)
         self.controls_layout.addWidget(self.t2_spinbox, 3, 1)
 
-        self.light_real_time_label = QLabel("Real Time: --")
+        self.light_real_time_label = QLabel("Tiempo Real: 1 s")
         self.controls_layout.addWidget(self.light_real_time_label, 3, 2)
 
-        self.fp_label = QLabel("Average Filter:")
-        self.fp_combo = QComboBox()
-        self.fp_combo.addItems(["Off", "On"])
-        self.fp_combo.currentIndexChanged.connect(self.update_fp)
-        self.controls_layout.addWidget(self.fp_label, 4, 0)
-        self.controls_layout.addWidget(self.fp_combo, 4, 1)
+        self.fl_label = QLabel("Filtro Promedio:")
+        self.fl_combo = QComboBox()
+        self.fl_combo.addItems(["Desactivado", "Activado"])
+        self.fl_combo.currentIndexChanged.connect(self.update_fl)
+        self.controls_layout.addWidget(self.fl_label, 4, 0)
+        self.controls_layout.addWidget(self.fl_combo, 4, 1)
 
-        self.sp_label = QLabel("Samples for Filtering:")
-        self.sp_spinbox = QSpinBox()
-        self.sp_spinbox.setRange(1, 50)
-        self.sp_spinbox.setValue(10)
-        self.sp_spinbox.valueChanged.connect(self.update_sp)
-        self.controls_layout.addWidget(self.sp_label, 4, 2)
+        self.sl_label = QLabel("Muestras para Filtro:")
+        self.sl_spinbox = QSpinBox()
+        self.sl_spinbox.setRange(1, 50)
+        self.sl_spinbox.setValue(10)
+        self.sl_spinbox.valueChanged.connect(self.update_sl)
+        self.controls_layout.addWidget(self.sl_label, 4, 2)
+        
+        # Nuevo: Valor actual del sensor
+        self.lux_value_label = QLabel("Valor Actual: -- %")
+        self.lux_value_label.setStyleSheet("font-weight: bold; color: blue;")
+        self.controls_layout.addWidget(self.lux_value_label, 3, 3, 1, 2)
 
         # Control Buttons
-        self.start_button = QPushButton("Start")
+        self.start_button = QPushButton("Iniciar")
         self.start_button.clicked.connect(self.start_acquisition)
         self.controls_layout.addWidget(self.start_button, 5, 0)
 
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton("Detener")
         self.stop_button.clicked.connect(self.stop_acquisition)
         self.controls_layout.addWidget(self.stop_button, 5, 1)
 
-        self.pause_button = QPushButton("Pause/Resume Graphs")
+        self.pause_button = QPushButton("Pausar/Reanudar Gráficas")
         self.pause_button.clicked.connect(self.toggle_pause)
         self.controls_layout.addWidget(self.pause_button, 5, 2)
+        
+        # Nuevo: Botón para sincronizar configuración
+        self.sync_button = QPushButton("Sincronizar Configuración")
+        self.sync_button.clicked.connect(self.sync_all_settings)
+        self.controls_layout.addWidget(self.sync_button, 5, 3)
 
         # Apply dark theme
         self.apply_dark_theme()
+        
+        # Inicializar etiquetas de tiempo según unidad seleccionada
+        self.update_time_labels()
 
     def apply_dark_theme(self):
         """Apply QDarkStyle theme."""
@@ -197,9 +221,11 @@ class RealTimeGraph(QMainWindow):
         """Reset graph data and refresh ports."""
         # Clear all data arrays with thread safety
         with self.data_lock:
-            self.time_data = []
-            self.lux_data = []
+            # Actualizar para usar los nuevos arrays
+            self.dist_times = []
+            self.lux_times = []
             self.dist_data = []
+            self.lux_data = []
             
         # Redraw empty graphs
         self.initialize_graph_labels()
@@ -216,6 +242,14 @@ class RealTimeGraph(QMainWindow):
 
     def initialize_graph_labels(self):
         """Set initial labels and titles for the graphs."""
+        # Clear existing plots
+        self.ax_lux.clear()
+        self.ax_dist.clear()
+        
+        # Ensure grid is visible
+        self.ax_lux.grid(True)
+        self.ax_dist.grid(True)
+        
         self.ax_lux.set_title("Fotorresistencia - Intensidad Lumínica (%)")
         self.ax_lux.set_xlabel("Tiempo")
         self.ax_lux.set_ylabel("Intensidad Lumínica (%)")
@@ -308,16 +342,19 @@ class RealTimeGraph(QMainWindow):
             self.serial_conn = None
 
     def read_serial_data(self):
-        """Read data from the serial port in a separate thread with improved error handling."""
+        """Read data from the serial port respecting sampling intervals."""
         print("Serial thread started")
         
         # Initialize data buffers with default values
         with self.data_lock:
-            if not self.time_data:
-                now = datetime.now()
-                self.time_data = [now]
-                self.lux_data = [0.0]
-                self.dist_data = [0.0]
+            now = datetime.now()
+            self.dist_times = []  # Inicializamos vacíos - solo agregamos puntos en intervalos correctos
+            self.lux_times = []
+            self.dist_data = []
+            self.lux_data = []
+            # Inicializamos los tiempos de último muestreo
+            self.last_t1_time = now
+            self.last_t2_time = now
         
         while self.running:
             try:
@@ -342,21 +379,31 @@ class RealTimeGraph(QMainWindow):
                     # Debug incoming data to console
                     print(f"Received raw data: '{line}'")
                     
-                    # Handle distance data (now correctly labeled as TEMP)
+                    # Handle distance data (TEMP)
                     if line.startswith("TEMP:"):
                         try:
                             parts = line.split(":")
                             if len(parts) >= 2:
                                 value_str = parts[1].strip()
                                 value = float(value_str)
-                                print(f"Parsed Sharp distance value: {value}")
+                                now = datetime.now()
                                 
-                                # Thread-safe data update using lock
-                                with self.data_lock:
-                                    now = datetime.now()
-                                    self.dist_data.append(value)  # Distance data goes to dist_data
-                                    self.time_data.append(now)
-                                    print(f"Added Sharp distance data point: {value} at {now}")
+                                # Actualizamos siempre el valor actual en la UI
+                                QApplication.instance().processEvents()
+                                self.dist_value_label.setText(f"Valor Actual: {value:.2f} cm")
+                                
+                                # Verificamos si este punto debe registrarse según el intervalo de muestreo
+                                if not self.last_t1_time or (now - self.last_t1_time).total_seconds() * 1000 >= self.t1_interval_ms:
+                                    # Solo agregamos el punto si corresponde al intervalo
+                                    with self.data_lock:
+                                        self.dist_data.append(value)
+                                        self.dist_times.append(now)
+                                        self.last_t1_time = now
+                                        print(f"Added Sharp distance data point at interval: {value:.2f} cm at {now}")
+                                else:
+                                    # Ignoramos esta lectura, está fuera del intervalo de muestreo
+                                    print(f"Skipping Sharp reading - outside sampling interval: {value:.2f} cm")
+                                    
                         except Exception as e:
                             print(f"Error parsing Sharp distance data: {e}, from line: '{line}'")
                     
@@ -367,18 +414,24 @@ class RealTimeGraph(QMainWindow):
                             if len(parts) >= 2:
                                 value_str = parts[1].strip()
                                 value = float(value_str)
-                                print(f"Parsed light intensity value: {value}")
+                                now = datetime.now()
                                 
-                                # Thread-safe data update using lock
-                                with self.data_lock:
-                                    now = datetime.now()
-                                    self.lux_data.append(value)  # Light intensity goes to lux_data
-                                    
-                                    # Only add a new timestamp if this is a completely new reading
-                                    if not self.time_data or abs((now - self.time_data[-1]).total_seconds()) > 0.1:
-                                        self.time_data.append(now)
-                                    
-                                    print(f"Added light intensity data point: {value} at {now}")
+                                # Actualizamos siempre el valor actual en la UI
+                                QApplication.instance().processEvents()
+                                self.lux_value_label.setText(f"Valor Actual: {value:.2f} %")
+                                
+                                # Verificamos si este punto debe registrarse según el intervalo de muestreo
+                                if not self.last_t2_time or (now - self.last_t2_time).total_seconds() * 1000 >= self.t2_interval_ms:
+                                    # Solo agregamos el punto si corresponde al intervalo
+                                    with self.data_lock:
+                                        self.lux_data.append(value)
+                                        self.lux_times.append(now)
+                                        self.last_t2_time = now
+                                        print(f"Added light intensity data point at interval: {value:.2f} % at {now}")
+                                else:
+                                    # Ignoramos esta lectura, está fuera del intervalo de muestreo
+                                    print(f"Skipping light reading - outside sampling interval: {value:.2f} %")
+                                
                         except Exception as e:
                             print(f"Error parsing light intensity data: {e}, from line: '{line}'")
                     
@@ -426,11 +479,11 @@ class RealTimeGraph(QMainWindow):
         """Toggle between simulated and real data sources."""
         self.use_simulated_data = not self.use_simulated_data
         if self.use_simulated_data:
-            self.toggle_data_button.setText("Mode: Simulated")
-            QMessageBox.information(self, "Data Source", "Switched to simulated data source.")
+            self.toggle_data_button.setText("Modo: Simulado")
+            QMessageBox.information(self, "Fuente de Datos", "Cambiado a fuente de datos simulada.")
         else:
-            self.toggle_data_button.setText("Mode: Real")
-            QMessageBox.information(self, "Data Source", "Switched to real data source.\nMake sure to select the correct port.")
+            self.toggle_data_button.setText("Modo: Real")
+            QMessageBox.information(self, "Fuente de Datos", "Cambiado a fuente de datos real.\nAsegúrese de seleccionar el puerto correcto.")
 
     def toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -443,37 +496,96 @@ class RealTimeGraph(QMainWindow):
             
         self.updating_time_unit = True
         try:
+            # Guardar valores actuales antes del cambio
+            old_t1 = self.t1_spinbox.value()
+            old_t2 = self.t2_spinbox.value()
+            old_unit = self.time_unit_combo.currentText()
+            new_unit = self.time_unit_combo.currentText()
+            
             unit_map = {"ms": "m", "s": "s", "min": "M"}  # Map interface options to STM32 expected values
-            unit = unit_map[self.time_unit_combo.currentText()]
+            unit = unit_map[new_unit]
             
             # Update UI to show actual value sent
             print(f"Setting time unit to: {unit}")
             
             # Clear existing data when changing time units to prevent scale issues
             with self.data_lock:
-                self.time_data = []
-                self.lux_data = []
+                self.dist_times = []
+                self.lux_times = []
                 self.dist_data = []
+                self.lux_data = []
             
             # Send to serial if connected
             if self.serial_conn and self.serial_conn.is_open:
                 try:
+                    # Primero enviar el cambio de unidad
                     command = f"TU:{unit}\r\n"
                     self.serial_conn.write(command.encode())
                     print(f"Sent command: {command}")
+                    time.sleep(0.1)  # Pequeña pausa para asegurar que se procese
+                    
+                    # Luego volver a enviar los tiempos de muestreo para asegurar consistencia
+                    self.serial_conn.write(f"T1:{self.t1_spinbox.value()}\r\n".encode())
+                    self.serial_conn.write(f"T2:{self.t2_spinbox.value()}\r\n".encode())
+                    print(f"Resent sampling times with new unit: {new_unit}")
                 except Exception as e:
                     print(f"Error sending time unit: {e}")
+            
+            # Actualizar etiquetas de tiempo
+            self.update_time_labels()
+            
+            # Si el timer está activo, actualizar su intervalo
+            if self.timer.isActive():
+                update_rate = min(
+                    self.calculate_real_sampling_time(self.t1_spinbox.value()),
+                    self.calculate_real_sampling_time(self.t2_spinbox.value())
+                )
+                update_rate = min(max(update_rate, 100), 1000)  # Entre 100ms y 1000ms
+                self.timer.setInterval(update_rate)
+                print(f"Timer interval updated to {update_rate}ms after unit change")
+            
+            # Actualizar los intervalos de muestreo simulados si están activos
+            if hasattr(self, 't1_interval'):
+                self.t1_interval = self.calculate_real_sampling_time(self.t1_spinbox.value())
+                print(f"T1 interval updated to {self.t1_interval}ms")
+            
+            if hasattr(self, 't2_interval'):
+                self.t2_interval = self.calculate_real_sampling_time(self.t2_spinbox.value())
+                print(f"T2 interval updated to {self.t2_interval}ms")
+            
+            # Reset simulation next sampling times with new intervals
+            if hasattr(self, 'next_t1_sample_time'):
+                self.t1_interval_ms = self.calculate_real_sampling_time(self.t1_spinbox.value())
+                self.next_t1_sample_time = datetime.now()
+                print(f"T1 interval reset to {self.t1_interval_ms}ms")
+            
+            if hasattr(self, 'next_t2_sample_time'):
+                self.t2_interval_ms = self.calculate_real_sampling_time(self.t2_spinbox.value())
+                self.next_t2_sample_time = datetime.now()
+                print(f"T2 interval reset to {self.t2_interval_ms}ms")
+            
         finally:
             # Always ensure we reset the flag
             self.updating_time_unit = False
+    
+    def update_time_labels(self):
+        """Update time labels to reflect the current time unit."""
+        unit_text = self.time_unit_combo.currentText()
+        self.temp_real_time_label.setText(f"Tiempo Real: {self.t1_spinbox.value()} {unit_text}")
+        self.light_real_time_label.setText(f"Tiempo Real: {self.t2_spinbox.value()} {unit_text}")
 
     def update_t1(self):
-        """Update temperature/light sampling time."""
+        """Update Sharp sensor sampling time."""
         value = self.t1_spinbox.value()
         
         # Update the real-time display
         unit_text = self.time_unit_combo.currentText()
-        self.temp_real_time_label.setText(f"Real Time: {value} {unit_text}")
+        self.temp_real_time_label.setText(f"Tiempo Real: {value} {unit_text}")
+        
+        # Update simulation intervals if active
+        if hasattr(self, 't1_interval'):
+            self.t1_interval = self.calculate_real_sampling_time(value)
+            print(f"T1 interval updated to {self.t1_interval}ms")
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
@@ -481,16 +593,37 @@ class RealTimeGraph(QMainWindow):
                 command = f"T1:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
+                
+                # Actualizar la tasa de refresco de la interfaz si es necesario
+                if self.timer.isActive():
+                    update_rate = min(
+                        self.calculate_real_sampling_time(value),
+                        self.calculate_real_sampling_time(self.t2_spinbox.value())
+                    )
+                    update_rate = min(max(update_rate, 100), 1000)  # Entre 100ms y 1000ms
+                    self.timer.setInterval(update_rate)
+                    print(f"Timer interval updated to {update_rate}ms after T1 change")
             except Exception as e:
                 print(f"Error sending T1: {e}")
+        
+        # Update simulation next sampling time with new interval
+        if hasattr(self, 'next_t1_sample_time'):
+            self.t1_interval_ms = self.calculate_real_sampling_time(value)
+            self.next_t1_sample_time = datetime.now() + timedelta(milliseconds=self.t1_interval_ms)
+            print(f"T1 interval updated to {self.t1_interval_ms}ms, next sample at {self.next_t1_sample_time.strftime('%H:%M:%S.%f')}")
 
     def update_t2(self):
-        """Update weight/distance sampling time."""
+        """Update photoresistor sampling time."""
         value = self.t2_spinbox.value()
         
         # Update the real-time display
         unit_text = self.time_unit_combo.currentText()
-        self.light_real_time_label.setText(f"Real Time: {value} {unit_text}")
+        self.light_real_time_label.setText(f"Tiempo Real: {value} {unit_text}")
+        
+        # Update simulation intervals if active
+        if hasattr(self, 't2_interval'):
+            self.t2_interval = self.calculate_real_sampling_time(value)
+            print(f"T2 interval updated to {self.t2_interval}ms")
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
@@ -498,11 +631,27 @@ class RealTimeGraph(QMainWindow):
                 command = f"T2:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
+                
+                # Actualizar la tasa de refresco de la interfaz si es necesario
+                if self.timer.isActive():
+                    update_rate = min(
+                        self.calculate_real_sampling_time(self.t1_spinbox.value()),
+                        self.calculate_real_sampling_time(value)
+                    )
+                    update_rate = min(max(update_rate, 100), 1000)  # Entre 100ms y 1000ms
+                    self.timer.setInterval(update_rate)
+                    print(f"Timer interval updated to {update_rate}ms after T2 change")
             except Exception as e:
                 print(f"Error sending T2: {e}")
+        
+        # Update simulation next sampling time with new interval
+        if hasattr(self, 'next_t2_sample_time'):
+            self.t2_interval_ms = self.calculate_real_sampling_time(value)
+            self.next_t2_sample_time = datetime.now() + timedelta(milliseconds=self.t2_interval_ms)
+            print(f"T2 interval updated to {self.t2_interval_ms}ms, next sample at {self.next_t2_sample_time.strftime('%H:%M:%S.%f')}")
 
     def update_ft(self):
-        """Update temperature/light filter setting."""
+        """Update Sharp sensor filter setting."""
         value = self.ft_combo.currentIndex()
         
         # Send to serial if connected
@@ -514,14 +663,13 @@ class RealTimeGraph(QMainWindow):
             except Exception as e:
                 print(f"Error sending FT: {e}")
 
-    def update_fp(self):
+    def update_fl(self):
         """Update light sensor filter setting."""
-        value = self.fp_combo.currentIndex()
+        value = self.fl_combo.currentIndex()
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
             try:
-                # Updated command FL instead of FP to match C++ code
                 command = f"FL:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
@@ -529,7 +677,7 @@ class RealTimeGraph(QMainWindow):
                 print(f"Error sending FL: {e}")
 
     def update_st(self):
-        """Update temperature/light filter sample count."""
+        """Update Sharp sensor filter sample count."""
         value = self.st_spinbox.value()
         
         # Send to serial if connected
@@ -541,38 +689,158 @@ class RealTimeGraph(QMainWindow):
             except Exception as e:
                 print(f"Error sending ST: {e}")
 
-    def update_sp(self):
+    def update_sl(self):
         """Update light sensor filter sample count."""
-        value = self.sp_spinbox.value()
+        value = self.sl_spinbox.value()
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
             try:
-                # Updated command SL instead of SP to match C++ code
                 command = f"SL:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
             except Exception as e:
                 print(f"Error sending SL: {e}")
+    
+    def sync_all_settings(self):
+        """Synchronize all settings with the STM32."""
+        if not self.serial_conn or not self.serial_conn.is_open:
+            QMessageBox.warning(self, "Advertencia", "No hay conexión serial activa.")
+            return
+            
+        try:
+            # Mostrar mensaje de sincronización
+            self.connection_status.setText("Estado: Sincronizando...")
+            self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
+            QApplication.processEvents()
+            
+            # Enviar todos los ajustes
+            self.send_all_settings()
+            
+            # Reset sampling times after synchronizing
+            now = datetime.now()
+            self.last_t1_time = now
+            self.last_t2_time = now
+            
+            # Mostrar mensaje de éxito
+            self.connection_status.setText("Estado: Sincronizado")
+            self.connection_status.setStyleSheet("color: green; font-weight: bold;")
+            QMessageBox.information(self, "Sincronización", "Configuración sincronizada correctamente.")
+        except Exception as e:
+            print(f"Error sincronizando: {e}")
+            self.connection_status.setText("Estado: Error")
+            self.connection_status.setStyleSheet("color: red; font-weight: bold;")
+
+    def send_all_settings(self):
+        """Send all current settings to the microcontroller with improved error handling."""
+        if not self.serial_conn or not self.serial_conn.is_open:
+            print("Cannot send settings: Serial connection not open")
+            return
+            
+        try:
+            # Use a list of commands to send
+            commands = []
+            
+            # Prepare all commands first - El orden es importante
+            # Primero la unidad de tiempo, luego los demás parámetros
+            unit_map = {"ms": "m", "s": "s", "min": "M"}
+            unit = unit_map[self.time_unit_combo.currentText()]
+            commands.append(f"TU:{unit}\r\n")
+            
+            commands.append(f"T1:{self.t1_spinbox.value()}\r\n")
+            commands.append(f"T2:{self.t2_spinbox.value()}\r\n")
+            
+            commands.append(f"FT:{self.ft_combo.currentIndex()}\r\n")
+            commands.append(f"FL:{self.fl_combo.currentIndex()}\r\n")
+            
+            commands.append(f"ST:{self.st_spinbox.value()}\r\n")
+            commands.append(f"SL:{self.sl_spinbox.value()}\r\n")
+            
+            # Now send each command with delay between them
+            for cmd in commands:
+                self.serial_conn.write(cmd.encode())
+                print(f"Sent: {cmd.strip()}")
+                time.sleep(0.15)  # Aumentar delay entre comandos para asegurar procesamiento
+                
+            # Confirmar que la configuración fue recibida
+            self.serial_conn.write(b"STATUS\r\n")
+            print("Sent: STATUS - requesting confirmation of settings")
+                
+            print("All settings sent successfully")
+            
+            # Store the intervals locally for filtering
+            self.t1_interval_ms = self.calculate_real_sampling_time(self.t1_spinbox.value())
+            self.t2_interval_ms = self.calculate_real_sampling_time(self.t2_spinbox.value())
+            
+        except Exception as e:
+            print(f"Error sending settings: {e}")
+
+    def calculate_real_sampling_time(self, value):
+        """Calcula el tiempo real de muestreo en milisegundos según la lógica del firmware STM32."""
+        unit = self.time_unit_combo.currentText()
+        # Replicamos exactamente la misma lógica del firmware STM32 (ver GraphCode.cpp)
+        if unit == "ms":
+            factor = 1
+        elif unit == "s":
+            factor = 1000
+        elif unit == "min":
+            factor = 60000
+        else:
+            factor = 1000  # Valor predeterminado es segundos
+            
+        arr_value = value * factor
+        if arr_value < 1:
+            arr_value = 1
+            
+        return arr_value
 
     def start_acquisition(self):
         """Start data acquisition with improved error handling."""
         try:
             # Reset data buffers to ensure clean start
             with self.data_lock:
-                self.time_data = []
-                self.lux_data = []  # Fotorresistencia (intensidad lumínica)
-                self.dist_data = []  # Sharp (distancia)
+                self.dist_times = []
+                self.lux_times = []
+                self.dist_data = []
+                self.lux_data = []
+                
+            # Asegurar que tenemos un punto inicial para evitar grafos vacíos
+            now = datetime.now()
+            with self.data_lock:
+                # Inicialización con al menos un punto de datos
+                if len(self.dist_data) == 0:
+                    self.dist_data.append(0.0)
+                    self.dist_times.append(now)
+                if len(self.lux_data) == 0:
+                    self.lux_data.append(0.0)
+                    self.lux_times.append(now)
                 
             # Update UI first
-            self.connection_status.setText("Status: Starting...")
+            self.connection_status.setText("Estado: Iniciando...")
             self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
             QApplication.processEvents()  # Force UI update
             
-            # Start or ensure timer is running
+            # Calcular intervalos de muestreo
+            self.t1_interval_ms = self.calculate_real_sampling_time(self.t1_spinbox.value())
+            self.t2_interval_ms = self.calculate_real_sampling_time(self.t2_spinbox.value())
+            
+            # Inicializar tiempos de último muestreo
+            now = datetime.now()
+            self.last_t1_time = now
+            self.last_t2_time = now
+            self.next_t1_sample_time = now  # Para datos simulados
+            self.next_t2_sample_time = now  # Para datos simulados
+            
+            print(f"Configured T1 sampling every {self.t1_interval_ms}ms")
+            print(f"Configured T2 sampling every {self.t2_interval_ms}ms")
+            
+            # Start or ensure timer is running - timer is just for UI updates, not for sampling
             if not self.timer.isActive():
-                self.timer.start(200)  # 5 Hz refresh rate - slower for stability
-                
+                # Fixed update rate for UI refreshes, sampling is controlled separately
+                update_rate = 100  # Refresh UI every 100ms (10 Hz) regardless of sampling rate
+                self.timer.start(update_rate)
+                print(f"Interfaz configurada para actualizarse cada {update_rate}ms")
+            
             # Handle real vs simulated data
             if not self.use_simulated_data:
                 try:
@@ -656,48 +924,17 @@ class RealTimeGraph(QMainWindow):
             if self.use_simulated_data:
                 self.connection_status.setText("Status: Simulated Data")
                 self.connection_status.setStyleSheet("color: orange; font-weight: bold;")
-        
+            
+            # Asegurar actualización de gráficos inmediata
+            self.update_graphs()
+            
         except Exception as e:
             print(f"Critical error in start_acquisition: {e}")
+            import traceback
+            traceback.print_exc()
             # Make sure UI stays responsive
             self.connection_status.setText("Status: Error")
             self.connection_status.setStyleSheet("color: red; font-weight: bold;")
-
-    def send_all_settings(self):
-        """Send all current settings to the microcontroller with improved error handling."""
-        if not self.serial_conn or not self.serial_conn.is_open:
-            print("Cannot send settings: Serial connection not open")
-            return
-            
-        try:
-            # Use a list of commands to send
-            commands = []
-            
-            # Prepare all commands first
-            unit_map = {"ms": "m", "s": "s", "min": "M"}
-            unit = unit_map[self.time_unit_combo.currentText()]
-            commands.append(f"TU:{unit}\r\n")
-            
-            commands.append(f"T1:{self.t1_spinbox.value()}\r\n")
-            commands.append(f"T2:{self.t2_spinbox.value()}\r\n")
-            
-            commands.append(f"FT:{self.ft_combo.currentIndex()}\r\n")
-            # Updated command FL instead of FP to match C++ code
-            commands.append(f"FL:{self.fp_combo.currentIndex()}\r\n")
-            
-            commands.append(f"ST:{self.st_spinbox.value()}\r\n")
-            # Updated command SL instead of SP to match C++ code
-            commands.append(f"SL:{self.sp_spinbox.value()}\r\n")
-            
-            # Now send each command with delay between them
-            for cmd in commands:
-                self.serial_conn.write(cmd.encode())
-                print(f"Sent: {cmd.strip()}")
-                time.sleep(0.1)  # Short delay between commands
-                
-            print("All settings sent successfully")
-        except Exception as e:
-            print(f"Error sending settings: {e}")
 
     def stop_acquisition(self):
         """Stop data acquisition and close the serial connection safely."""
@@ -749,32 +986,25 @@ class RealTimeGraph(QMainWindow):
 
             # Make a thread-safe copy of the data
             with self.data_lock:
-                # Skip if no data or we're changing time units
-                if not self.time_data:
-                    return
+                # Skip if no data
+                if (not self.dist_times and not self.lux_times) or \
+                   (len(self.dist_times) == 0 and len(self.lux_times) == 0):
+                    # Si no hay datos, crear al menos un punto para evitar gráficos vacíos
+                    now = datetime.now()
+                    if len(self.dist_times) == 0:
+                        self.dist_times = [now]
+                        self.dist_data = [0.0]
+                    if len(self.lux_times) == 0:
+                        self.lux_times = [now]
+                        self.lux_data = [0.0]
                     
-                time_data = self.time_data.copy()
-                lux_data = self.lux_data.copy() if self.lux_data else []
-                dist_data = self.dist_data.copy() if self.dist_data else []
+                # Copiamos los datos de cada sensor por separado
+                dist_times = self.dist_times.copy() if self.dist_times else [datetime.now()]
+                dist_data = self.dist_data.copy() if self.dist_data else [0.0]
                 
-                # Ensure we have equal length arrays by duplicating the last value if needed
-                if len(lux_data) < len(time_data):
-                    last_value = lux_data[-1] if lux_data else 0
-                    lux_data.extend([last_value] * (len(time_data) - len(lux_data)))
-                    
-                if len(dist_data) < len(time_data):
-                    last_value = dist_data[-1] if dist_data else 0
-                    dist_data.extend([last_value] * (len(time_data) - len(dist_data)))
-                
-                # Trim extra data if needed
-                time_data = time_data[:min(len(time_data), len(lux_data), len(dist_data))]
-                lux_data = lux_data[:len(time_data)]
-                dist_data = dist_data[:len(time_data)]
+                lux_times = self.lux_times.copy() if self.lux_times else [datetime.now()]
+                lux_data = self.lux_data.copy() if self.lux_data else [0.0]
             
-            # Skip update if there's no data
-            if not time_data or len(time_data) == 0:
-                return
-                
             # Clear previous plots
             self.ax_lux.clear()
             self.ax_dist.clear()
@@ -783,17 +1013,47 @@ class RealTimeGraph(QMainWindow):
             self.ax_lux.grid(True)
             self.ax_dist.grid(True)
             
-            # Plot the light data with correct labels in Spanish
-            try:
-                self.ax_lux.plot(time_data, lux_data, label="Intensidad Lumínica (%)", color="blue", marker="o", linestyle="-", markersize=2)
-            except Exception as e:
-                print(f"Error plotting light data: {e}")
+            # Plot the light intensity data - asegurar que hay al menos un punto
+            if lux_times and len(lux_times) > 0:
+                try:
+                    # Si solo hay un punto, duplicarlo para poder graficarlo
+                    if len(lux_times) == 1:
+                        lux_times = [lux_times[0], lux_times[0] + timedelta(seconds=1)]
+                        lux_data = [lux_data[0], lux_data[0]]
+                        
+                    self.ax_lux.plot(lux_times, lux_data, label="Intensidad Lumínica (%)", 
+                                     color="blue", marker="o", linestyle="-", markersize=4)
+                    
+                    # Mostrar intervalos explícitamente
+                    interval_ms = self.calculate_real_sampling_time(self.t2_spinbox.value())
+                    interval_text = f"Intervalo: {self.t2_spinbox.value()} {self.time_unit_combo.currentText()}"
+                    self.ax_lux.text(0.02, 0.95, interval_text, transform=self.ax_lux.transAxes,
+                                    fontsize=9, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                except Exception as e:
+                    print(f"Error plotting light data: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
-            # Plot the distance data with correct labels in Spanish
-            try:
-                self.ax_dist.plot(time_data, dist_data, label="Distancia (cm)", color="green", marker="o", linestyle="-", markersize=2)
-            except Exception as e:
-                print(f"Error plotting distance data: {e}")
+            # Plot the distance data - asegurar que hay al menos un punto
+            if dist_times and len(dist_times) > 0:
+                try:
+                    # Si solo hay un punto, duplicarlo para poder graficarlo
+                    if len(dist_times) == 1:
+                        dist_times = [dist_times[0], dist_times[0] + timedelta(seconds=1)]
+                        dist_data = [dist_data[0], dist_data[0]]
+                        
+                    self.ax_dist.plot(dist_times, dist_data, label="Distancia (cm)", 
+                                     color="green", marker="o", linestyle="-", markersize=4)
+                    
+                    # Mostrar intervalos explícitamente
+                    interval_ms = self.calculate_real_sampling_time(self.t1_spinbox.value())
+                    interval_text = f"Intervalo: {self.t1_spinbox.value()} {self.time_unit_combo.currentText()}"
+                    self.ax_dist.text(0.02, 0.95, interval_text, transform=self.ax_dist.transAxes,
+                                    fontsize=9, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                except Exception as e:
+                    print(f"Error plotting distance data: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Set titles and labels
             self.ax_lux.set_title("Fotorresistencia - Intensidad Lumínica (%)")
@@ -858,6 +1118,9 @@ class RealTimeGraph(QMainWindow):
             # Auto-adjust spacing to prevent overlapping
             self.figure.tight_layout()
             
+            # Log para depuración
+            print(f"Update graphs: Plotting dist_data={len(dist_data)} points, lux_data={len(lux_data)} points")
+            
             # Update the figure
             self.canvas.draw()
             
@@ -867,7 +1130,7 @@ class RealTimeGraph(QMainWindow):
             traceback.print_exc()
 
     def generate_simulated_data(self):
-        """Generate simulated data with thread safety."""
+        """Generate simulated data with precise timing to match the configured sampling rates."""
         # Don't generate data while time unit is changing
         if self.updating_time_unit:
             return
@@ -875,47 +1138,113 @@ class RealTimeGraph(QMainWindow):
         try:
             now = datetime.now()
             
+            # Crear puntos iniciales si es necesario
+            if not self.dist_data or len(self.dist_data) == 0:
+                with self.data_lock:
+                    self.dist_data.append(75.0)  # Valor inicial razonable
+                    self.dist_times.append(now)
+                    
+            if not self.lux_data or len(self.lux_data) == 0:
+                with self.data_lock:
+                    self.lux_data.append(50.0)  # Valor inicial razonable
+                    self.lux_times.append(now)
+            
             with self.data_lock:
-                # Generate data based on time unit - different frequencies for different units
+                # Solo generamos datos de distancia cuando toca según el intervalo configurado
+                if hasattr(self, 'next_t1_sample_time') and now >= self.next_t1_sample_time:
+                    # Datos del sensor Sharp (distancia)
+                    last_dist = self.dist_data[-1] if self.dist_data else 75.0
+                    
+                    # Determinamos la magnitud del cambio según la unidad de tiempo
+                    time_unit = self.time_unit_combo.currentText()
+                    if time_unit == "ms":
+                        dist_change = random.uniform(-0.5, 0.5)
+                    elif time_unit == "min":
+                        dist_change = random.uniform(-3, 3)
+                    else:  # segundos
+                        dist_change = random.uniform(-1, 1)
+                    
+                    # Generamos el nuevo valor
+                    new_dist = max(10, min(150, last_dist + dist_change))
+                    
+                    # Agregamos a los arrays específicos de distancia
+                    self.dist_data.append(new_dist)
+                    self.dist_times.append(now)
+                    
+                    # Actualizamos el valor actual
+                    self.dist_value_label.setText(f"Valor Actual: {new_dist:.2f} cm")
+                    
+                    # Calculamos el siguiente tiempo de muestreo
+                    self.next_t1_sample_time = self.next_t1_sample_time + timedelta(milliseconds=self.t1_interval_ms)
+                    
+                    # Si nos retrasamos, corregimos el próximo tiempo
+                    if self.next_t1_sample_time < now:
+                        self.next_t1_sample_time = now + timedelta(milliseconds=self.t1_interval_ms)
+                    
+                    print(f"T1: Generated distance data point: {new_dist:.2f} cm at {now.strftime('%H:%M:%S.%f')}")
+                    print(f"T1: Next sample at: {self.next_t1_sample_time.strftime('%H:%M:%S.%f')}")
+                
+                # Solo generamos datos de luz cuando toca según el intervalo configurado
+                if hasattr(self, 'next_t2_sample_time') and now >= self.next_t2_sample_time:
+                    # Datos del sensor de luz
+                    last_lux = self.lux_data[-1] if self.lux_data else 50.0
+                    
+                    # Determinamos la magnitud del cambio según la unidad de tiempo
+                    time_unit = self.time_unit_combo.currentText()
+                    if time_unit == "ms":
+                        lux_change = random.uniform(-1, 1)
+                    elif time_unit == "min":
+                        lux_change = random.uniform(-5, 5)
+                    else:  # segundos
+                        lux_change = random.uniform(-2, 2)
+                    
+                    # Generamos el nuevo valor
+                    new_lux = max(0, min(100, last_lux + lux_change))
+                    
+                    # Agregamos a los arrays específicos de luz
+                    self.lux_data.append(new_lux)
+                    self.lux_times.append(now)
+                    
+                    # Actualizamos el valor actual
+                    self.lux_value_label.setText(f"Valor Actual: {new_lux:.2f} %")
+                    
+                    # Calculamos el siguiente tiempo de muestreo
+                    self.next_t2_sample_time = self.next_t2_sample_time + timedelta(milliseconds=self.t2_interval_ms)
+                    
+                    # Si nos retrasamos, corregimos el próximo tiempo
+                    if self.next_t2_sample_time < now:
+                        self.next_t2_sample_time = now + timedelta(milliseconds=self.t2_interval_ms)
+                    
+                    print(f"T2: Generated light data point: {new_lux:.2f} % at {now.strftime('%H:%M:%S.%f')}")
+                    print(f"T2: Next sample at: {self.next_t2_sample_time.strftime('%H:%M:%S.%f')}")
+                
+                # Limpiamos los datos antiguos basados en la unidad de tiempo
                 time_unit = self.time_unit_combo.currentText()
-                
-                # Generate smoother data for visualization
-                last_lux = self.lux_data[-1] if self.lux_data else 50.0
-                last_dist = self.dist_data[-1] if self.dist_data else 75.0
-                
-                # Add random walk with constraints based on time unit
-                if time_unit == "ms":
-                    # Small changes for milliseconds (high frequency)
-                    lux_change = random.uniform(-1, 1)
-                    dist_change = random.uniform(-0.5, 0.5)
-                elif time_unit == "min":
-                    # Larger changes for minutes (low frequency)
-                    lux_change = random.uniform(-5, 5)
-                    dist_change = random.uniform(-3, 3)
-                else:  # seconds
-                    # Medium changes for seconds
-                    lux_change = random.uniform(-2, 2)
-                    dist_change = random.uniform(-1, 1)
-                
-                # Apply random walk with bounds
-                new_lux = max(0, min(100, last_lux + lux_change))
-                new_dist = max(10, min(150, last_dist + dist_change))
-                
-                # Add new data points
-                self.lux_data.append(new_lux)
-                self.dist_data.append(new_dist)
-                self.time_data.append(now)
-
-                # Keep only the last 60 seconds or 10 minutes of data
                 max_duration = timedelta(minutes=10) if time_unit == "min" else timedelta(seconds=60)
-                while len(self.time_data) > 1 and now - self.time_data[0] > max_duration:
-                    self.time_data.pop(0)
-                    if self.lux_data:
-                        self.lux_data.pop(0)
-                    if self.dist_data:
-                        self.dist_data.pop(0)
+                
+                # Limpiamos arrays de distancia
+                while len(self.dist_times) > 1 and now - self.dist_times[0] > max_duration:
+                    self.dist_times.pop(0)
+                    self.dist_data.pop(0)
+                
+                # Limpiamos arrays de luz
+                while len(self.lux_times) > 1 and now - self.lux_times[0] > max_duration:
+                    self.lux_times.pop(0)
+                    self.lux_data.pop(0)
+                
+                # Forzar al menos un punto inicial si no hay datos para mostrar
+                if len(self.dist_data) == 0:
+                    self.dist_data.append(75.0)  # Valor inicial razonable
+                    self.dist_times.append(now)
+                    
+                if len(self.lux_data) == 0:
+                    self.lux_data.append(50.0)  # Valor inicial razonable
+                    self.lux_times.append(now)
+                
         except Exception as e:
             print(f"Error generating simulated data: {e}")
+            import traceback
+            traceback.print_exc()
 
     def closeEvent(self, event):
         """Handle the window close event safely."""
