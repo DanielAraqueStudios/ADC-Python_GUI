@@ -19,7 +19,7 @@ volatile double distancesharp;
 // Variables ADC2 - intensidad lumínica
 volatile uint16_t data_value_adc1;
 volatile float voltaje2;
-volatile double pesog;
+volatile double intensidadLuz;
 
 // Variables para control de tiempos
 uint32_t tiempo1 = 1; // Tiempo de muestreo para ADC2 (distancia sharp)
@@ -29,13 +29,13 @@ char time_unit = 's'; // 'm' para ms, 's' para segundos, 'M' para minutos
 // Variables para filtro promedio
 #define MAX_SAMPLES 50
 float temp_buffer[MAX_SAMPLES];
-float peso_buffer[MAX_SAMPLES];
+float luz_buffer[MAX_SAMPLES];
 uint8_t temp_index = 0;
-uint8_t peso_index = 0;
+uint8_t luz_index = 0;
 uint8_t temp_samples = 10; // Número de muestras por defecto para distancia sharp
-uint8_t peso_samples = 10; // Número de muestras por defecto para intensidad lumínica
+uint8_t luz_samples = 10; // Número de muestras por defecto para intensidad lumínica
 uint8_t filtro_temp = 0;   // 0: Sin filtro, 1: Con filtro
-uint8_t filtro_peso = 0;   // 0: Sin filtro, 1: Con filtro
+uint8_t filtro_luz = 0;   // 0: Sin filtro, 1: Con filtro
 
 // Función para calcular promedio
 float calcularPromedio(float buffer[], uint8_t num_samples) {
@@ -78,8 +78,8 @@ void procesar_comando(const char* cmd) {
     
     // Manejo especial para el comando STATUS que no requiere valor
     if (strcmp(tipo, "STATUS") == 0) {
-        sprintf(text, "INFO:STATUS:T1=%lu,T2=%lu,TU=%c,FT=%d,FP=%d,ST=%d,SP=%d,RUN=%d\r\n", 
-                tiempo1, tiempo2, time_unit, filtro_temp, filtro_peso, temp_samples, peso_samples, flag);
+        sprintf(text, "INFO:STATUS:T1=%lu,T2=%lu,TU=%c,FT=%d,FL=%d,ST=%d,SL=%d,RUN=%d\r\n", 
+                tiempo1, tiempo2, time_unit, filtro_temp, filtro_luz, temp_samples, luz_samples, flag);
         UART_Send_String(text);
         return;
     }
@@ -147,10 +147,10 @@ void procesar_comando(const char* cmd) {
         filtro_temp = (atoi(valor) == 0) ? 0 : 1;
         sprintf(text, "OK:FT:%d\r\n", filtro_temp);
         UART_Send_String(text);
-    } else if (strcmp(tipo, "FP") == 0) {
+    } else if (strcmp(tipo, "FL") == 0) {
         // Filtro intensidad lumínica (0=off, 1=on)
-        filtro_peso = (atoi(valor) == 0) ? 0 : 1;
-        sprintf(text, "OK:FP:%d\r\n", filtro_peso);
+        filtro_luz = (atoi(valor) == 0) ? 0 : 1;
+        sprintf(text, "OK:FL:%d\r\n", filtro_luz);
         UART_Send_String(text);
     } else if (strcmp(tipo, "ST") == 0) {
         // Muestras para filtro distancia sharp
@@ -160,12 +160,12 @@ void procesar_comando(const char* cmd) {
             sprintf(text, "OK:ST:%d\r\n", temp_samples);
             UART_Send_String(text);
         }
-    } else if (strcmp(tipo, "SP") == 0) {
+    } else if (strcmp(tipo, "SL") == 0) {
         // Muestras para filtro intensidad lumínica
         int val = atoi(valor);
         if (val > 0 && val <= MAX_SAMPLES) {
-            peso_samples = val;
-            sprintf(text, "OK:SP:%d\r\n", peso_samples);
+            luz_samples = val;
+            sprintf(text, "OK:SL:%d\r\n", luz_samples);
             UART_Send_String(text);
         }
     } else {
@@ -218,7 +218,7 @@ extern "C" {
             sprintf(text, "TEMP:%.2f\r\n", distancesharp);
             UART_Send_String(text);
             
-            // Toggle LED para indicar actividad
+            // Toggle LED PB7 para indicar actividad de muestreo
             GPIOB->ODR ^= (1<<7);
         }
     }
@@ -235,17 +235,17 @@ extern "C" {
             ADC1->SR &= ~(1<<1); // Limpiar el flag EOC
             data_value_adc1 = ADC1->DR;
             voltaje1 = data_value_adc1 * (3.3 / 990); // Corrección para resolución completa de 10 bits
-            pesog = (voltaje1 * 303.03f);
+            intensidadLuz = (3.3-voltaje1) /0.03; // Conversión a lux (ajustar según la fórmula real)
             
             // Aplicar filtro promedio si está activado
-            if (filtro_peso) {
-                peso_buffer[peso_index] = pesog;
-                peso_index = (peso_index + 1) % peso_samples;
-                pesog = calcularPromedio(peso_buffer, peso_samples);
+            if (filtro_luz) {
+                luz_buffer[luz_index] = intensidadLuz;
+                luz_index = (luz_index + 1) % luz_samples;
+                intensidadLuz = calcularPromedio(luz_buffer, luz_samples);
             }
             
             // Enviar datos formateados por UART
-            sprintf(text, "intensidad lumínica:%.2f\r\n", pesog);
+            sprintf(text, "intensidad lumínica:%.2f\r\n", intensidadLuz);
             UART_Send_String(text);
         }
     }
@@ -288,7 +288,7 @@ int main() {
     // Inicializar buffers para filtros
     for (int i = 0; i < MAX_SAMPLES; i++) {
         temp_buffer[i] = 0.0f;
-        peso_buffer[i] = 0.0f;
+        luz_buffer[i] = 0.0f;
     }
     
     // ----- Configuración de GPIOs -----
@@ -381,7 +381,7 @@ int main() {
     // Mensaje de inicio
     UART_Send_String("Sistema iniciado v3.0\r\n");
     UART_Send_String("Enviar 'a' para iniciar, 'b' para detener\r\n");
-    UART_Send_String("Comandos: T1:tiempo, T2:tiempo, TU:[m,s,M], FT:[0,1], FP:[0,1], ST:muestras, SP:muestras\r\n");
+    UART_Send_String("Comandos: T1:tiempo, T2:tiempo, TU:[m,s,M], FT:[0,1], FL:[0,1], ST:muestras, SL:muestras\r\n");
     
     // Bucle principal
     while(1) {
@@ -430,12 +430,12 @@ int main() {
         }
         
         if (flag == 1) {
-            // Modo de adquisición activo
-            GPIOB->ODR ^= (1<<0); // Toggle LED para indicar funcionamiento
+            // Modo de adquisición activo - LED PB0 parpadea
+            GPIOB->ODR ^= (1<<0);
             SysTick_ms(500);
         } else {
-            // Modo inactivo
-            GPIOB->ODR &= ~(1<<0); // LED apagado en modo inactivo
+            // Modo inactivo - LED PB0 apagado
+            GPIOB->ODR &= ~(1<<0);
             SysTick_ms(200);
         }
     }

@@ -17,7 +17,7 @@ import qdarkstyle
 class RealTimeGraph(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Real-Time Sensor Monitoring")
+        self.setWindowTitle("Monitoreo de Sensores en Tiempo Real")
         self.setGeometry(100, 100, 1200, 800)
 
         # Serial connection
@@ -30,6 +30,9 @@ class RealTimeGraph(QMainWindow):
         self.is_paused = False  # Flag to pause/resume graphs
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_graphs)
+        
+        # Flag to indicate time unit change (prevents recursion)
+        self.updating_time_unit = False
 
         # Add connection status at class level
         self.connection_status = None
@@ -339,7 +342,7 @@ class RealTimeGraph(QMainWindow):
                     # Debug incoming data to console
                     print(f"Received raw data: '{line}'")
                     
-                    # Handle distance data (previously parsed as TEMP)
+                    # Handle distance data (now correctly labeled as TEMP)
                     if line.startswith("TEMP:"):
                         try:
                             parts = line.split(":")
@@ -351,13 +354,13 @@ class RealTimeGraph(QMainWindow):
                                 # Thread-safe data update using lock
                                 with self.data_lock:
                                     now = datetime.now()
-                                    self.dist_data.append(value)  # Now correctly goes to distance data
+                                    self.dist_data.append(value)  # Distance data goes to dist_data
                                     self.time_data.append(now)
                                     print(f"Added Sharp distance data point: {value} at {now}")
                         except Exception as e:
                             print(f"Error parsing Sharp distance data: {e}, from line: '{line}'")
                     
-                    # Handle light intensity data (previously parsed as PESO)
+                    # Handle light intensity data
                     elif line.startswith("intensidad lumínica:"):
                         try:
                             parts = line.split(":")
@@ -369,7 +372,7 @@ class RealTimeGraph(QMainWindow):
                                 # Thread-safe data update using lock
                                 with self.data_lock:
                                     now = datetime.now()
-                                    self.lux_data.append(value)  # Now correctly goes to light data
+                                    self.lux_data.append(value)  # Light intensity goes to lux_data
                                     
                                     # Only add a new timestamp if this is a completely new reading
                                     if not self.time_data or abs((now - self.time_data[-1]).total_seconds()) > 0.1:
@@ -434,26 +437,35 @@ class RealTimeGraph(QMainWindow):
 
     def update_time_unit(self):
         """Update the time unit for sampling."""
-        unit_map = {"ms": "m", "s": "s", "min": "M"}  # Map interface options to STM32 expected values
-        unit = unit_map[self.time_unit_combo.currentText()]
-        
-        # Update UI to show actual value sent
-        print(f"Setting time unit to: {unit}")
-        
-        # Send to serial if connected
-        if self.serial_conn and self.serial_conn.is_open:
-            try:
-                command = f"TU:{unit}\r\n"
-                self.serial_conn.write(command.encode())
-                print(f"Sent command: {command}")
-            except Exception as e:
-                print(f"Error sending time unit: {e}")
-        
-        # Update existing time data to match new unit for better visualization
-        with self.data_lock:
-            if self.time_data:
-                # Redraw the graphs with new time scale
-                self.update_graphs()
+        # Prevent recursive calls or processing while already updating
+        if self.updating_time_unit:
+            return
+            
+        self.updating_time_unit = True
+        try:
+            unit_map = {"ms": "m", "s": "s", "min": "M"}  # Map interface options to STM32 expected values
+            unit = unit_map[self.time_unit_combo.currentText()]
+            
+            # Update UI to show actual value sent
+            print(f"Setting time unit to: {unit}")
+            
+            # Clear existing data when changing time units to prevent scale issues
+            with self.data_lock:
+                self.time_data = []
+                self.lux_data = []
+                self.dist_data = []
+            
+            # Send to serial if connected
+            if self.serial_conn and self.serial_conn.is_open:
+                try:
+                    command = f"TU:{unit}\r\n"
+                    self.serial_conn.write(command.encode())
+                    print(f"Sent command: {command}")
+                except Exception as e:
+                    print(f"Error sending time unit: {e}")
+        finally:
+            # Always ensure we reset the flag
+            self.updating_time_unit = False
 
     def update_t1(self):
         """Update temperature/light sampling time."""
@@ -503,17 +515,18 @@ class RealTimeGraph(QMainWindow):
                 print(f"Error sending FT: {e}")
 
     def update_fp(self):
-        """Update weight/distance filter setting."""
+        """Update light sensor filter setting."""
         value = self.fp_combo.currentIndex()
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
             try:
-                command = f"FP:{value}\r\n"
+                # Updated command FL instead of FP to match C++ code
+                command = f"FL:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
             except Exception as e:
-                print(f"Error sending FP: {e}")
+                print(f"Error sending FL: {e}")
 
     def update_st(self):
         """Update temperature/light filter sample count."""
@@ -529,17 +542,18 @@ class RealTimeGraph(QMainWindow):
                 print(f"Error sending ST: {e}")
 
     def update_sp(self):
-        """Update weight/distance filter sample count."""
+        """Update light sensor filter sample count."""
         value = self.sp_spinbox.value()
         
         # Send to serial if connected
         if self.serial_conn and self.serial_conn.is_open:
             try:
-                command = f"SP:{value}\r\n"
+                # Updated command SL instead of SP to match C++ code
+                command = f"SL:{value}\r\n"
                 self.serial_conn.write(command.encode())
                 print(f"Sent command: {command}")
             except Exception as e:
-                print(f"Error sending SP: {e}")
+                print(f"Error sending SL: {e}")
 
     def start_acquisition(self):
         """Start data acquisition with improved error handling."""
@@ -668,10 +682,12 @@ class RealTimeGraph(QMainWindow):
             commands.append(f"T2:{self.t2_spinbox.value()}\r\n")
             
             commands.append(f"FT:{self.ft_combo.currentIndex()}\r\n")
-            commands.append(f"FP:{self.fp_combo.currentIndex()}\r\n")
+            # Updated command FL instead of FP to match C++ code
+            commands.append(f"FL:{self.fp_combo.currentIndex()}\r\n")
             
             commands.append(f"ST:{self.st_spinbox.value()}\r\n")
-            commands.append(f"SP:{self.sp_spinbox.value()}\r\n")
+            # Updated command SL instead of SP to match C++ code
+            commands.append(f"SL:{self.sp_spinbox.value()}\r\n")
             
             # Now send each command with delay between them
             for cmd in commands:
@@ -719,6 +735,10 @@ class RealTimeGraph(QMainWindow):
 
     def update_graphs(self):
         """Update graphs with thread-safety and debug output."""
+        # Don't update graphs during time unit change
+        if self.updating_time_unit:
+            return
+            
         try:
             if self.is_paused:
                 return
@@ -729,18 +749,20 @@ class RealTimeGraph(QMainWindow):
 
             # Make a thread-safe copy of the data
             with self.data_lock:
-                time_data = self.time_data.copy() if self.time_data else []
+                # Skip if no data or we're changing time units
+                if not self.time_data:
+                    return
+                    
+                time_data = self.time_data.copy()
                 lux_data = self.lux_data.copy() if self.lux_data else []
                 dist_data = self.dist_data.copy() if self.dist_data else []
                 
                 # Ensure we have equal length arrays by duplicating the last value if needed
                 if len(lux_data) < len(time_data):
-                    print(f"Padding lux data from {len(lux_data)} to {len(time_data)} points")
                     last_value = lux_data[-1] if lux_data else 0
                     lux_data.extend([last_value] * (len(time_data) - len(lux_data)))
                     
                 if len(dist_data) < len(time_data):
-                    print(f"Padding distance data from {len(dist_data)} to {len(time_data)} points")
                     last_value = dist_data[-1] if dist_data else 0
                     dist_data.extend([last_value] * (len(time_data) - len(dist_data)))
                 
@@ -751,7 +773,6 @@ class RealTimeGraph(QMainWindow):
             
             # Skip update if there's no data
             if not time_data or len(time_data) == 0:
-                print("No data to plot yet, skipping graph update")
                 return
                 
             # Clear previous plots
@@ -786,37 +807,32 @@ class RealTimeGraph(QMainWindow):
             self.ax_dist.legend()
             
             # Format time axis for better readability based on selected time unit
-            from matplotlib.dates import DateFormatter
-            time_unit = self.time_unit_combo.currentText()
-            
-            # Choose appropriate time format based on selected unit
-            if time_unit == "ms":
-                date_format = DateFormatter('%H:%M:%S.%f')  # Show milliseconds
+            try:
+                from matplotlib.dates import DateFormatter
+                time_unit = self.time_unit_combo.currentText()
                 
-                # For milliseconds, set appropriate x-axis limits
-                if len(time_data) > 1:
-                    # Calculate time range in seconds
-                    time_range = (time_data[-1] - time_data[0]).total_seconds()
-                    # If less than 10 seconds of data, limit x-axis to keep good resolution
-                    if time_range < 10:
-                        self.ax_lux.set_xlim(time_data[0], time_data[0] + timedelta(seconds=10))
-                        self.ax_dist.set_xlim(time_data[0], time_data[0] + timedelta(seconds=10))
-            elif time_unit == "min":
-                date_format = DateFormatter('%H:%M')  # Show hours:minutes
-            else:  # Default for seconds
-                date_format = DateFormatter('%H:%M:%S')
+                # Choose appropriate time format based on selected unit
+                if time_unit == "ms":
+                    date_format = DateFormatter('%H:%M:%S.%f')  # Show milliseconds
+                elif time_unit == "min":
+                    date_format = DateFormatter('%H:%M')  # Show hours:minutes
+                else:  # Default for seconds
+                    date_format = DateFormatter('%H:%M:%S')
+                    
+                self.ax_lux.xaxis.set_major_formatter(date_format)
+                self.ax_dist.xaxis.set_major_formatter(date_format)
                 
-            self.ax_lux.xaxis.set_major_formatter(date_format)
-            self.ax_dist.xaxis.set_major_formatter(date_format)
-            
-            # Rotate date labels for better readability
-            for label in self.ax_lux.get_xticklabels():
-                label.set_rotation(45)
-                label.set_ha('right')
-            
-            for label in self.ax_dist.get_xticklabels():
-                label.set_rotation(45)
-                label.set_ha('right')
+                # Rotate date labels for better readability
+                for label in self.ax_lux.get_xticklabels():
+                    label.set_rotation(45)
+                    label.set_ha('right')
+                
+                for label in self.ax_dist.get_xticklabels():
+                    label.set_rotation(45)
+                    label.set_ha('right')
+                
+            except Exception as e:
+                print(f"Error formatting time axis: {e}")
             
             # Adjust y-axis to reduce visual spikes
             if len(lux_data) > 1:
@@ -845,15 +861,17 @@ class RealTimeGraph(QMainWindow):
             # Update the figure
             self.canvas.draw()
             
-            print("Graph updated successfully")
-                
         except Exception as e:
-            print(f"Critical error in update_graphs: {e}")
+            print(f"Error in update_graphs: {e}")
             import traceback
             traceback.print_exc()
 
     def generate_simulated_data(self):
         """Generate simulated data with thread safety."""
+        # Don't generate data while time unit is changing
+        if self.updating_time_unit:
+            return
+            
         try:
             now = datetime.now()
             
