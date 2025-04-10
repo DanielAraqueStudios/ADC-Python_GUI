@@ -1,0 +1,104 @@
+/* General window styling */
+QMainWindow {
+    background-color: #f4f4f9;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 14px;
+    color: #333;
+}
+
+/* Section titles */
+QLabel[role="section-title"] {
+    font-size: 16px;
+    font-weight: bold;
+    color: #0078D7;
+    margin-bottom: 10px;
+}
+
+/* Labels */
+QLabel {
+    font-size: 14px;
+    color: #555;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: #0078D7;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    padding: 8px 15px;
+    font-size: 14px;
+    font-weight: bold;
+    transition: background-color 0.3s ease;
+}
+
+QPushButton:hover {
+    background-color: #005A9E;
+}
+
+QPushButton:pressed {
+    background-color: #003F73;
+}
+
+/* ComboBox */
+QComboBox {
+    background-color: white;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    padding: 5px;
+    font-size: 14px;
+}
+
+QComboBox::drop-down {
+    border: none;
+}
+
+QComboBox QAbstractItemView {
+    background-color: white;
+    border: 1px solid #ccc;
+    selection-background-color: #0078D7;
+    selection-color: white;
+}
+
+/* SpinBox */
+QSpinBox {
+    background-color: white;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    padding: 5px;
+    font-size: 14px;
+}
+
+/* Status label */
+QLabel[role="status"] {
+    font-size: 14px;
+    font-weight: bold;
+    padding: 5px;
+    border-radius: 5px;
+}
+
+QLabel[status="connected"] {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+QLabel[status="disconnected"] {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+/* Graph canvas */
+QWidget[role="graph"] {
+    border: 2px solid #0078D7;
+    border-radius: 10px;
+    background-color: white;
+    margin: 10px;
+}
+
+/* Grid layout spacing */
+QGridLayout {
+    margin: 10px;
+    spacing: 10px;
+}
