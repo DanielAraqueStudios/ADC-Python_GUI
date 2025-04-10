@@ -175,18 +175,39 @@ class RealTimeGraph(QMainWindow):
         self.controls_layout.addWidget(title_label, self.controls_layout.rowCount(), 0, 1, 3)
 
     def refresh_ports(self):
-        """Refresh available serial ports."""
+        """Refresh available serial ports and reset graph data."""
         self.port_combo.clear()
         try:
             ports = serial.tools.list_ports.comports()
             for port in ports:
                 self.port_combo.addItem(port.device)
             
-            # Add refresh button
+            # Add refresh button if it doesn't exist
             if not hasattr(self, 'refresh_button'):
-                self.refresh_button = QPushButton("Refresh")
-                self.refresh_button.clicked.connect(self.refresh_ports)
+                self.refresh_button = QPushButton("Refresh & Reset")
+                self.refresh_button.clicked.connect(self.reset_and_refresh)
                 self.controls_layout.addWidget(self.refresh_button, 0, 6)
+        except Exception as e:
+            print(f"Error refreshing ports: {e}")
+
+    def reset_and_refresh(self):
+        """Reset graph data and refresh ports."""
+        # Clear all data arrays with thread safety
+        with self.data_lock:
+            self.time_data = []
+            self.lux_data = []
+            self.dist_data = []
+            
+        # Redraw empty graphs
+        self.initialize_graph_labels()
+            
+        # Refresh ports
+        self.port_combo.clear()
+        try:
+            ports = serial.tools.list_ports.comports()
+            for port in ports:
+                self.port_combo.addItem(port.device)
+            print("Ports refreshed and graphs reset")
         except Exception as e:
             print(f"Error refreshing ports: {e}")
 
@@ -427,6 +448,12 @@ class RealTimeGraph(QMainWindow):
                 print(f"Sent command: {command}")
             except Exception as e:
                 print(f"Error sending time unit: {e}")
+        
+        # Update existing time data to match new unit for better visualization
+        with self.data_lock:
+            if self.time_data:
+                # Redraw the graphs with new time scale
+                self.update_graphs()
 
     def update_t1(self):
         """Update temperature/light sampling time."""
@@ -722,9 +749,6 @@ class RealTimeGraph(QMainWindow):
                 lux_data = lux_data[:len(time_data)]
                 dist_data = dist_data[:len(time_data)]
             
-            # Print debug info about data
-            print(f"Data status: Time points={len(time_data)}, Light points={len(lux_data)}, Distance points={len(dist_data)}")
-            
             # Skip update if there's no data
             if not time_data or len(time_data) == 0:
                 print("No data to plot yet, skipping graph update")
@@ -738,15 +762,15 @@ class RealTimeGraph(QMainWindow):
             self.ax_lux.grid(True)
             self.ax_dist.grid(True)
             
-            # Plot the light data
+            # Plot the light data with correct labels in Spanish
             try:
-                self.ax_lux.plot(time_data, lux_data, label="Light (%)", color="blue", marker="o", linestyle="-", markersize=4)
+                self.ax_lux.plot(time_data, lux_data, label="Intensidad Lumínica (%)", color="blue", marker="o", linestyle="-", markersize=2)
             except Exception as e:
                 print(f"Error plotting light data: {e}")
                 
-            # Plot the distance data
+            # Plot the distance data with correct labels in Spanish
             try:
-                self.ax_dist.plot(time_data, dist_data, label="Distance (cm)", color="green", marker="o", linestyle="-", markersize=4)
+                self.ax_dist.plot(time_data, dist_data, label="Distancia (cm)", color="green", marker="o", linestyle="-", markersize=2)
             except Exception as e:
                 print(f"Error plotting distance data: {e}")
             
@@ -761,9 +785,27 @@ class RealTimeGraph(QMainWindow):
             self.ax_dist.set_ylabel("Distancia (cm)")
             self.ax_dist.legend()
             
-            # Format time axis for better readability
+            # Format time axis for better readability based on selected time unit
             from matplotlib.dates import DateFormatter
-            date_format = DateFormatter('%H:%M:%S')
+            time_unit = self.time_unit_combo.currentText()
+            
+            # Choose appropriate time format based on selected unit
+            if time_unit == "ms":
+                date_format = DateFormatter('%H:%M:%S.%f')  # Show milliseconds
+                
+                # For milliseconds, set appropriate x-axis limits
+                if len(time_data) > 1:
+                    # Calculate time range in seconds
+                    time_range = (time_data[-1] - time_data[0]).total_seconds()
+                    # If less than 10 seconds of data, limit x-axis to keep good resolution
+                    if time_range < 10:
+                        self.ax_lux.set_xlim(time_data[0], time_data[0] + timedelta(seconds=10))
+                        self.ax_dist.set_xlim(time_data[0], time_data[0] + timedelta(seconds=10))
+            elif time_unit == "min":
+                date_format = DateFormatter('%H:%M')  # Show hours:minutes
+            else:  # Default for seconds
+                date_format = DateFormatter('%H:%M:%S')
+                
             self.ax_lux.xaxis.set_major_formatter(date_format)
             self.ax_dist.xaxis.set_major_formatter(date_format)
             
@@ -775,6 +817,27 @@ class RealTimeGraph(QMainWindow):
             for label in self.ax_dist.get_xticklabels():
                 label.set_rotation(45)
                 label.set_ha('right')
+            
+            # Adjust y-axis to reduce visual spikes
+            if len(lux_data) > 1:
+                # Calculate sensible y-limits for light data with 10% padding
+                lux_min = min(lux_data)
+                lux_max = max(lux_data)
+                lux_range = max(lux_max - lux_min, 1.0)  # Avoid division by zero
+                self.ax_lux.set_ylim(
+                    lux_min - (0.1 * lux_range), 
+                    lux_max + (0.1 * lux_range)
+                )
+            
+            if len(dist_data) > 1:
+                # Calculate sensible y-limits for distance data with 10% padding
+                dist_min = min(dist_data)
+                dist_max = max(dist_data)
+                dist_range = max(dist_max - dist_min, 1.0)  # Avoid division by zero
+                self.ax_dist.set_ylim(
+                    dist_min - (0.1 * dist_range), 
+                    dist_max + (0.1 * dist_range)
+                )
                 
             # Auto-adjust spacing to prevent overlapping
             self.figure.tight_layout()
@@ -795,13 +858,38 @@ class RealTimeGraph(QMainWindow):
             now = datetime.now()
             
             with self.data_lock:
-                # Add both light and distance data with the same timestamp
-                self.lux_data.append(random.uniform(0, 100))
-                self.dist_data.append(random.uniform(10, 150))
+                # Generate data based on time unit - different frequencies for different units
+                time_unit = self.time_unit_combo.currentText()
+                
+                # Generate smoother data for visualization
+                last_lux = self.lux_data[-1] if self.lux_data else 50.0
+                last_dist = self.dist_data[-1] if self.dist_data else 75.0
+                
+                # Add random walk with constraints based on time unit
+                if time_unit == "ms":
+                    # Small changes for milliseconds (high frequency)
+                    lux_change = random.uniform(-1, 1)
+                    dist_change = random.uniform(-0.5, 0.5)
+                elif time_unit == "min":
+                    # Larger changes for minutes (low frequency)
+                    lux_change = random.uniform(-5, 5)
+                    dist_change = random.uniform(-3, 3)
+                else:  # seconds
+                    # Medium changes for seconds
+                    lux_change = random.uniform(-2, 2)
+                    dist_change = random.uniform(-1, 1)
+                
+                # Apply random walk with bounds
+                new_lux = max(0, min(100, last_lux + lux_change))
+                new_dist = max(10, min(150, last_dist + dist_change))
+                
+                # Add new data points
+                self.lux_data.append(new_lux)
+                self.dist_data.append(new_dist)
                 self.time_data.append(now)
 
                 # Keep only the last 60 seconds or 10 minutes of data
-                max_duration = timedelta(minutes=10) if self.time_unit_combo.currentText() == "min" else timedelta(seconds=60)
+                max_duration = timedelta(minutes=10) if time_unit == "min" else timedelta(seconds=60)
                 while len(self.time_data) > 1 and now - self.time_data[0] > max_duration:
                     self.time_data.pop(0)
                     if self.lux_data:
